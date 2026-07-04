@@ -1,0 +1,22 @@
+[project]
+name = "yale-chemistry-project"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "jupyter>=1.1.1",
+    "molplotly>=1.1.5",
+    "optuna>=4.9.0",
+    "pandarallel>=1.6.5",
+    "pandas>=3.0.3",
+    "plotly>=6.8.0",
+    "plotnine>=0.15.5",
+    "pyarrow>=24.0.0",
+    "rdkit>=2026.3.2",
+    "scikit-learn>=1.9.0",
+    "seaborn>=0.13.2",
+    "shap>=0.47.0",
+    "skimpy>=0.0.20",
+    "torch>=2.12.1",
+]
