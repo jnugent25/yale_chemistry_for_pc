@@ -189,6 +189,33 @@ def logp_targets(smiles: pd.Series) -> np.ndarray:
     return vals
 
 
+def _trial_row(t: optuna.trial.FrozenTrial) -> dict:
+    """Flatten one completed trial into the JSON row schema, pulling from the
+    persisted study (params + user_attrs + objective values) rather than any
+    in-memory state, so the dump is correct even after a resume."""
+    return {
+        "name": f"trial_{t.number}",
+        "n_components": t.params.get("n_components"),
+        "h_sigma": t.params.get("h_sigma_ppm"),
+        "c_sigma": t.params.get("c_sigma_ppm"),
+        "val_rel_recon_err": t.user_attrs.get("val_rel_recon_err"),
+        "fg_micro_f1": t.user_attrs.get("fg_micro_f1"),
+        "fg_macro_f1": t.user_attrs.get("fg_macro_f1"),
+        "logp_r2": t.values[1] if t.values is not None else None,
+        "gap_ev_r2": t.values[0] if t.values is not None else None,
+    }
+
+
+def dump_results(study: optuna.Study, path: Path) -> None:
+    """Write every COMPLETE trial in the study to the JSON output path."""
+    rows = [
+        _trial_row(t)
+        for t in study.trials
+        if t.state == optuna.trial.TrialState.COMPLETE
+    ]
+    path.write_text(json.dumps(rows, indent=2))
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Tune NMF representation (gap_ev-primary, recon+FG+logP guardrails).")
     p.add_argument("--raw-data", type=Path, default=Path("/Users/jacknugent/Downloads/alberts_merged_10k.pkl"))
@@ -198,8 +225,15 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--max-iter", type=int, default=600)
     p.add_argument("--h-step-ppm", type=float, default=0.01)
     p.add_argument("--c-step-ppm", type=float, default=0.25)
-    p.add_argument("--n-trials", type=int, default=50, help="Number of Optuna trials to run.")
+    p.add_argument("--n-trials", type=int, default=50,
+                   help="Target TOTAL number of trials in the study; on resume, only the "
+                        "remaining trials are run.")
     p.add_argument("--out", type=Path, default=Path("/Users/jacknugent/Downloads/alberts_gap_repr_sweep.json"))
+    p.add_argument("--storage", type=Path, default=None,
+                   help="SQLite file backing the Optuna study for resumability. "
+                        "Defaults to <out>.db next to --out.")
+    p.add_argument("--study-name", type=str, default="nmf_repr",
+                   help="Optuna study name; reused to resume an existing study in --storage.")
     return p.parse_args()
 
 
@@ -270,7 +304,6 @@ def main() -> None:
     # Small LRU over raw rasterized matrices (~hundreds of MB each at float32).
     matrix_cache: OrderedDict[tuple, tuple[np.ndarray, np.ndarray]] = OrderedDict()
     max_cache_entries = 3
-    results: list[dict] = []
 
     def objective(trial: optuna.Trial) -> float:
         # Integer (not categorical) so TPE sees the ordering; recon improves with
@@ -400,26 +433,13 @@ def main() -> None:
         else:
             gap_r2 = float("nan")
 
-        row = {
-            "name": cfg.name,
-            "n_components": cfg.n_components,
-            "h_sigma": cfg.h_sigma_ppm,
-            "c_sigma": cfg.c_sigma_ppm,
-            "val_rel_recon_err": rel_err,
-            "fg_micro_f1": micro,
-            "fg_macro_f1": macro,
-            "logp_r2": logp_r2,
-            "gap_ev_r2": gap_r2,
-        }
-        results.append(row)
-        # Persist after every trial so a crash/interrupt never loses progress.
-        args.out.write_text(json.dumps(results, indent=2))
         print(
             f"  -> recon_err={rel_err:.4f} | FG micro={micro:.4f} macro={macro:.4f}"
             f" | logP R²={logp_r2:.4f} | gap_ev R²={gap_r2:.4f}\n",
             flush=True,
         )
 
+        # Persisted on the trial (in SQLite) so the JSON dump survives a resume.
         trial.set_user_attr("val_rel_recon_err", rel_err)
         trial.set_user_attr("fg_micro_f1", micro)
         trial.set_user_attr("fg_macro_f1", macro)
@@ -429,14 +449,35 @@ def main() -> None:
             raise optuna.TrialPruned("gap_ev or logP target unavailable for this split")
         return gap_r2, logp_r2
 
+    # SQLite-backed, resumable study. Re-running the same command reloads the
+    # study and only runs the trials still missing to reach the --n-trials target,
+    # so an interruption (WSL shutdown, reboot, crash) never loses progress.
+    storage_path = args.storage or args.out.with_suffix(".db")
+    storage_path.parent.mkdir(parents=True, exist_ok=True)
+    storage_url = f"sqlite:///{storage_path}"
+
     # Multi-objective: jointly maximize held-out gap_ev R² and logP R².
     study = optuna.create_study(
+        study_name=args.study_name,
+        storage=storage_url,
+        load_if_exists=True,
         directions=["maximize", "maximize"],
         sampler=optuna.samplers.TPESampler(seed=args.seed),
     )
-    study.optimize(objective, n_trials=args.n_trials)
 
-    args.out.write_text(json.dumps(results, indent=2))
+    already = len(study.trials)
+    remaining = max(0, args.n_trials - already)
+    print(f"Study '{args.study_name}' @ {storage_path}")
+    print(f"  {already} existing trials; running {remaining} more to reach {args.n_trials}.\n")
+
+    # Rewrite the JSON after every finished trial (from the persisted study).
+    def _save_callback(study: optuna.Study, _trial: optuna.trial.FrozenTrial) -> None:
+        dump_results(study, args.out)
+
+    if remaining > 0:
+        study.optimize(objective, n_trials=remaining, callbacks=[_save_callback])
+
+    dump_results(study, args.out)
 
     completed = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
     n_pruned = sum(t.state == optuna.trial.TrialState.PRUNED for t in study.trials)
@@ -463,15 +504,16 @@ def main() -> None:
         for k, v in t.params.items():
             print(f"      {k}: {v}")
 
-    print("\nAll Trials (in order of completion):")
+    print("\nAll Trials (by trial number):")
     print(f"{'trial':<10}{'nc':>5}{'hσ':>7}{'cσ':>7}{'recon↓':>10}{'FG micro↑':>11}{'FG macro↑':>11}{'logP R²↑':>10}{'gap R²↑':>10}")
     print("-" * 87)
-    for r in results:
+    for r in sorted((_trial_row(t) for t in completed), key=lambda r: int(r["name"].split("_")[1])):
         print(
             f"{r['name']:<10}{r['n_components']:>5}{r['h_sigma']:>7.2f}{r['c_sigma']:>7.2f}"
             f"{r['val_rel_recon_err']:>10.4f}{r['fg_micro_f1']:>11.4f}{r['fg_macro_f1']:>11.4f}{r['logp_r2']:>10.4f}{r['gap_ev_r2']:>10.4f}"
         )
     print(f"\nWrote: {args.out}")
+    print(f"Resume/extend with the same command (raise --n-trials to add more).")
 
 
 if __name__ == "__main__":
