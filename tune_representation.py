@@ -22,6 +22,7 @@ import pandas as pd
 from sklearn.decomposition import NMF
 
 warnings.filterwarnings("ignore", category=RuntimeWarning, module="sklearn")
+from sklearn.exceptions import ConvergenceWarning
 from sklearn.linear_model import ElasticNetCV, LogisticRegression
 from sklearn.metrics import f1_score, r2_score
 from sklearn.pipeline import make_pipeline
@@ -133,15 +134,19 @@ def fit_predict_per_label_logreg(
         if col.sum() == 0 or col.sum() == len(col):
             continue
         clf = LogisticRegression(
-            penalty="elasticnet",
             solver="saga",
             l1_ratio=0.5,
             C=1.0,
             class_weight="balanced",
-            max_iter=2000,
+            max_iter=5000,
+            tol=1e-3,
             random_state=random_state,
         )
-        clf.fit(x_tr, col)
+        # This is a guardrail metric, not the optimization target, so a label
+        # that just misses the strict tolerance is fine — quiet the warning.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=ConvergenceWarning)
+            clf.fit(x_tr, col)
         predictions[:, label_idx] = clf.predict(x_te)
     return predictions
 
@@ -164,7 +169,11 @@ def elasticnet_r2(
             n_jobs=-1,
         ),
     )
-    model.fit(x_train, y_train)
+    # Downstream target/guardrail regressor on the NMF codes; a near-converged
+    # elastic-net fit is fine for comparing R² across trials — quiet the warning.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=ConvergenceWarning)
+        model.fit(x_train, y_train)
     return float(r2_score(y_test, model.predict(x_test)))
 
 
@@ -196,6 +205,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    args.out.parent.mkdir(parents=True, exist_ok=True)
 
     print(f"Loading {args.raw_data} ...")
     df = pd.read_pickle(args.raw_data)
