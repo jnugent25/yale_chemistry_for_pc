@@ -1,14 +1,17 @@
 """Tune the HistGradientBoosting hyperparameters for gap_ev and diagnose overfitting.
 
-Builds the tuned NMF representation (from the sweep study), fits NMF on the
-training split only, then tunes the booster with Optuna over cross-validated R².
-The point is to see the overfitting gap directly: for both the default and the
-tuned booster it reports train R² vs CV R² vs held-out test R² — a large
-train-minus-test gap is the overfitting signal. Also writes a learning curve
-(train vs validation score as training data grows) and an actual-vs-predicted plot.
+Builds the tuned NMF representation (from the sweep study) and tunes the booster
+with Optuna over cross-validated R². Crucially, the whole NMF→HGB pipeline is
+cross-validated, so NMF is refit inside every fold — a validation-fold molecule
+is never encoded by an NMF that has seen it. This removes the representation
+leakage that otherwise inflates CV R² far above the honest held-out number.
 
-NMF is fit once on the training split and held fixed while the booster is tuned;
-the final test evaluation uses codes the booster never saw, so it stays honest.
+For both the default and tuned booster it reports train R² vs (honest) CV R² vs
+held-out test R² — a large train-minus-test gap is the overfitting signal. Also
+writes a learning curve and an actual-vs-predicted plot.
+
+Note: refitting NMF per fold makes this markedly slower than tuning on fixed
+codes (n_trials × cv NMF fits); lower --n-trials or --max-iter to trade off.
 """
 
 from __future__ import annotations
@@ -26,7 +29,9 @@ import optuna
 from sklearn.ensemble import HistGradientBoostingRegressor
 from sklearn.metrics import r2_score, root_mean_squared_error
 from sklearn.model_selection import KFold, cross_val_score, learning_curve, train_test_split
+from sklearn.pipeline import Pipeline
 
+from tune_representation import SweepConfig
 from train_gap_model import (
     build_representation,
     config_from_params,
@@ -47,7 +52,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--sample", type=int, default=12000)
     p.add_argument("--test-frac", type=float, default=0.2)
     p.add_argument("--cv", type=int, default=5, help="CV folds for booster tuning.")
-    p.add_argument("--n-trials", type=int, default=40, help="Optuna trials for the booster.")
+    p.add_argument("--n-trials", type=int, default=25,
+                   help="Optuna trials for the booster (each costs cv NMF refits).")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--max-iter", type=int, default=600, help="NMF max_iter.")
     p.add_argument("--h-step-ppm", type=float, default=0.01)
@@ -69,14 +75,31 @@ def make_hgb(params: dict, seed: int) -> HistGradientBoostingRegressor:
     )
 
 
-def evaluate(model, w_tr, gap_tr, w_te, gap_te, cv, seed) -> dict:
-    """Train R², cross-validated R² on train, and held-out test R² for one model."""
+def make_pipeline(cfg: SweepConfig, hgb_params: dict, nmf_max_iter: int, seed: int) -> Pipeline:
+    """NMF → HGB pipeline. Cross-validating this refits NMF inside each fold, so
+    a validation-fold molecule is never encoded by an NMF that has seen it."""
+    return Pipeline([
+        ("nmf", make_nmf(cfg, nmf_max_iter)),
+        ("hgb", make_hgb(hgb_params, seed)),
+    ])
+
+
+def evaluate(cfg, hgb_params, x_tr, gap_tr, x_te, gap_te, cv, seed, nmf_max_iter) -> tuple[dict, Pipeline]:
+    """Train R², honest (per-fold-NMF) CV R², and held-out test R² for one booster.
+
+    CV cross-validates the full NMF→HGB pipeline on the raw representation matrix,
+    so NMF is refit per fold; the returned pipeline is fit on all training rows.
+    """
     kf = KFold(n_splits=cv, shuffle=True, random_state=seed)
-    cv_scores = cross_val_score(model, w_tr, gap_tr, cv=kf, scoring="r2", n_jobs=-1)
-    model.fit(w_tr, gap_tr)
-    train_r2 = r2_score(gap_tr, model.predict(w_tr))
-    test_pred = model.predict(w_te)
-    return {
+    cv_scores = cross_val_score(
+        make_pipeline(cfg, hgb_params, nmf_max_iter, seed),
+        x_tr, gap_tr, cv=kf, scoring="r2", n_jobs=-1,
+    )
+    pipe = make_pipeline(cfg, hgb_params, nmf_max_iter, seed)
+    pipe.fit(x_tr, gap_tr)
+    train_r2 = r2_score(gap_tr, pipe.predict(x_tr))
+    test_pred = pipe.predict(x_te)
+    metrics = {
         "train_r2": float(train_r2),
         "cv_r2_mean": float(cv_scores.mean()),
         "cv_r2_std": float(cv_scores.std()),
@@ -84,6 +107,7 @@ def evaluate(model, w_tr, gap_tr, w_te, gap_te, cv, seed) -> dict:
         "test_rmse": float(root_mean_squared_error(gap_te, test_pred)),
         "overfit_gap": float(train_r2 - r2_score(gap_te, test_pred)),
     }
+    return metrics, pipe
 
 
 def report(label: str, m: dict) -> None:
@@ -94,9 +118,10 @@ def report(label: str, m: dict) -> None:
     print(f"  overfit gap = {m['overfit_gap']:.4f}   (train R² − test R²)")
 
 
-def plot_learning_curve(model, w_tr, gap_tr, cv, seed, out_dir: Path) -> None:
+def plot_learning_curve(estimator, x_tr, gap_tr, cv, seed, out_dir: Path) -> None:
+    # estimator is the NMF→HGB pipeline, so NMF is refit at every training size/fold.
     sizes, train_scores, val_scores = learning_curve(
-        model, w_tr, gap_tr, cv=KFold(cv, shuffle=True, random_state=seed),
+        estimator, x_tr, gap_tr, cv=KFold(cv, shuffle=True, random_state=seed),
         scoring="r2", train_sizes=np.linspace(0.2, 1.0, 6), n_jobs=-1,
     )
     fig, ax = plt.subplots(figsize=(7, 5))
@@ -122,7 +147,7 @@ def plot_actual_vs_pred(y_true, y_pred, m: dict, out_dir: Path) -> None:
     ax.plot([lo, hi], [lo, hi], "k--", lw=1, label="ideal")
     ax.set_xlabel("actual gap_ev (eV)")
     ax.set_ylabel("predicted gap_ev (eV)")
-    ax.set_title(f"Tuned HGB on NMF codes\nR²={m['test_r2']:.3f}  RMSE={m['test_rmse']:.3f} eV")
+    ax.set_title(f"Tuned NMF→HGB (held-out)\nR²={m['test_r2']:.3f}  RMSE={m['test_rmse']:.3f} eV")
     ax.legend()
     ax.grid(True, alpha=0.3)
     ax.set_aspect("equal", adjustable="box")
@@ -147,12 +172,11 @@ def main() -> None:
     x = build_representation(df, cfg, args.h_step_ppm, args.c_step_ppm)
     print(f"Working set: {len(df)} molecules; representation {x.shape}")
 
-    # Fit NMF once on the training split; hold codes fixed while tuning the booster.
+    # Split on the raw representation matrix; NMF is refit downstream (per fold
+    # during CV, and on the whole training block for the final test estimate).
     idx = np.arange(len(x))
     tr, te = train_test_split(idx, test_size=args.test_frac, random_state=args.seed)
-    nmf = make_nmf(cfg, args.max_iter)
-    w_tr = nmf.fit_transform(x[tr])
-    w_te = nmf.transform(x[te])
+    x_tr, x_te = x[tr], x[te]
     gap_tr, gap_te = gap[tr], gap[te]
 
     kf = KFold(n_splits=args.cv, shuffle=True, random_state=args.seed)
@@ -165,33 +189,35 @@ def main() -> None:
             l2_regularization=t.suggest_float("l2_regularization", 1e-3, 10.0, log=True),
             max_features=t.suggest_float("max_features", 0.3, 1.0),
         )
-        model = make_hgb(params, args.seed)
-        scores = cross_val_score(model, w_tr, gap_tr, cv=kf, scoring="r2", n_jobs=-1)
+        pipe = make_pipeline(cfg, params, args.max_iter, args.seed)
+        scores = cross_val_score(pipe, x_tr, gap_tr, cv=kf, scoring="r2", n_jobs=-1)
         return float(scores.mean())
 
-    print(f"\nTuning booster: {args.n_trials} trials, {args.cv}-fold CV ...")
+    print(f"\nTuning booster: {args.n_trials} trials, {args.cv}-fold CV "
+          f"(NMF refit per fold — this is the slow part) ...")
     study = optuna.create_study(direction="maximize",
                                 sampler=optuna.samplers.TPESampler(seed=args.seed))
     study.optimize(objective, n_trials=args.n_trials, show_progress_bar=False)
-    print(f"Best CV R² = {study.best_value:.4f}")
+    print(f"Best honest CV R² = {study.best_value:.4f}")
     print("Best booster params:")
     for k, v in study.best_params.items():
         print(f"    {k}: {v}")
 
-    default_metrics = evaluate(make_hgb({}, args.seed), w_tr, gap_tr, w_te, gap_te, args.cv, args.seed)
-    tuned_model = make_hgb(study.best_params, args.seed)
-    tuned_metrics = evaluate(tuned_model, w_tr, gap_tr, w_te, gap_te, args.cv, args.seed)
+    default_metrics, _ = evaluate(cfg, {}, x_tr, gap_tr, x_te, gap_te, args.cv, args.seed, args.max_iter)
+    tuned_metrics, tuned_pipe = evaluate(
+        cfg, study.best_params, x_tr, gap_tr, x_te, gap_te, args.cv, args.seed, args.max_iter
+    )
 
-    print("\n=== Overfitting diagnosis (gap_ev) ===")
+    print("\n=== Overfitting diagnosis (gap_ev, honest per-fold NMF) ===")
     report("Default booster", default_metrics)
     report("Tuned booster", tuned_metrics)
-    print("\nInterpretation: a large train−test gap means overfitting; if the tuned "
-          "gap is smaller and test R² is similar or higher, tuning helped generalization.")
+    print("\nInterpretation: CV R² now refits NMF per fold, so it should track the "
+          "held-out test R² closely; a large train−test gap still means overfitting.")
 
-    # Plots + saved summary use the tuned model refit on all training codes.
-    tuned_model.fit(w_tr, gap_tr)
-    plot_actual_vs_pred(gap_te, tuned_model.predict(w_te), tuned_metrics, args.out_dir)
-    plot_learning_curve(tuned_model, w_tr, gap_tr, args.cv, args.seed, args.out_dir)
+    # tuned_pipe is already fit on all training rows by evaluate().
+    plot_actual_vs_pred(gap_te, tuned_pipe.predict(x_te), tuned_metrics, args.out_dir)
+    plot_learning_curve(make_pipeline(cfg, study.best_params, args.max_iter, args.seed),
+                        x_tr, gap_tr, args.cv, args.seed, args.out_dir)
 
     summary = {
         "representation_trial": trial.number,
