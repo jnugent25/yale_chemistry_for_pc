@@ -73,6 +73,20 @@ def make_hgb(params: dict, seed: int) -> HistGradientBoostingRegressor:
     )
 
 
+def make_hgb_preset(seed: int) -> HistGradientBoostingRegressor:
+    """Shallow, few-tree HGB from an external grid search — far more regularized
+    than the Optuna-tuned one (max_depth=4, max_iter=200), so it should overfit
+    much less. Fixed params, no HPO."""
+    return HistGradientBoostingRegressor(
+        learning_rate=0.07,
+        max_depth=4,
+        max_iter=200,
+        min_samples_leaf=20,
+        l2_regularization=1.0,
+        random_state=seed,
+    )
+
+
 def make_rf(seed: int) -> RandomForestRegressor:
     """Random forest with modest regularization (shallow-ish via min_samples_leaf,
     subsampled features). Bagging generalizes better than boosting when the codes
@@ -224,10 +238,12 @@ def main() -> None:
     # so we can see which final estimator actually generalizes on this representation.
     linear_metrics = evaluate(make_linear(args.seed), w_tr, g_tr, w_va, g_va, w_te, g_te)
     rf_metrics = evaluate(make_rf(args.seed), w_tr, g_tr, w_va, g_va, w_te, g_te)
+    preset_metrics = evaluate(make_hgb_preset(args.seed), w_tr, g_tr, w_va, g_va, w_te, g_te)
 
     print("\n=== gap_ev on the SAME split: linear vs RF vs boosted ===")
     report("ElasticNet (linear, like the sweep probe)", linear_metrics)
     report("Random forest (regularized, no HPO)", rf_metrics)
+    report("HGB preset (shallow: depth 4, 200 trees)", preset_metrics)
     report("Default booster", default_metrics)
     report("Tuned booster", tuned_metrics)
     print("\nInterpretation: val and test are out-of-sample for NMF, so they should "
@@ -243,6 +259,7 @@ def main() -> None:
         "best_booster_params": study.best_params,
         "linear_elasticnet": linear_metrics,
         "random_forest": rf_metrics,
+        "hgb_preset_shallow": preset_metrics,
         "default": default_metrics,
         "tuned": tuned_metrics,
     }
