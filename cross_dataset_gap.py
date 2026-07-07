@@ -11,6 +11,7 @@ dataset it has never seen, using a representation fit only on the train set.
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 import matplotlib
@@ -39,6 +40,9 @@ def parse_args() -> argparse.Namespace:
                    default=Path("/Users/jacknugent/Downloads/alberts_gap_repr_sweep.db"))
     p.add_argument("--study-name", type=str, default="nmf_repr")
     p.add_argument("--trial", type=int, default=None, help="Representation trial; default = best sweep gap_ev R².")
+    p.add_argument("--params-json", type=Path, default=None,
+                   help="JSON file of NMF hyperparameters to use directly, instead of pulling "
+                        "a trial from --storage (lets you run without the study db).")
     p.add_argument("--sample", type=int, default=12000)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--max-iter", type=int, default=600, help="NMF max_iter.")
@@ -76,15 +80,24 @@ def report(label: str, m: dict) -> None:
 
 def main() -> None:
     args = parse_args()
-    for pth in (args.train_data, args.test_data, args.storage):
+    required = [args.train_data, args.test_data]
+    if args.params_json is None:
+        required.append(args.storage)
+    for pth in required:
         if not pth.exists():
             raise SystemExit(f"Not found: {pth}")
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
-    trial = select_trial(args.storage, args.study_name, args.trial)
-    cfg = config_from_params(trial.params)
-    print(f"Representation: trial {trial.number} (sweep gap_ev R²={trial.values[0]:.4f}), "
-          f"n_components={cfg.n_components}")
+    if args.params_json is not None:
+        params = json.loads(args.params_json.read_text())
+        cfg = config_from_params(params)
+        print(f"Representation from {args.params_json.name}: n_components={cfg.n_components}, "
+              f"solver={cfg.solver}, transform={cfg.intensity_transform}")
+    else:
+        trial = select_trial(args.storage, args.study_name, args.trial)
+        cfg = config_from_params(trial.params)
+        print(f"Representation: trial {trial.number} (sweep gap_ev R²={trial.values[0]:.4f}), "
+              f"n_components={cfg.n_components}")
 
     # Train dataset.
     print(f"\nTrain: {args.train_data}")
@@ -112,8 +125,10 @@ def main() -> None:
     print(f"\nRepresentation: train {x_tr.shape}, test {x_te.shape}")
     print(f"Fitting NMF on train (max_iter={args.max_iter}) ...")
     nmf = make_nmf(cfg, args.max_iter)
-    w_tr = nmf.fit_transform(x_tr)
-    w_te = nmf.transform(x_te)
+    # float64 codes: ElasticNetCV's Gram precompute fails its precision check on
+    # float32 at this scale (the codes are small, so this is cheap).
+    w_tr = nmf.fit_transform(x_tr).astype(np.float64)
+    w_te = nmf.transform(x_te).astype(np.float64)
 
     # Drop any NaN gap targets defensively.
     m_tr = ~np.isnan(gap_tr)
