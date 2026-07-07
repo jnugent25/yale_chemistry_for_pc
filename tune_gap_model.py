@@ -25,8 +25,11 @@ import matplotlib.pyplot as plt
 import numpy as np
 import optuna
 from sklearn.ensemble import HistGradientBoostingRegressor
+from sklearn.linear_model import ElasticNetCV
 from sklearn.metrics import r2_score, root_mean_squared_error
 from sklearn.model_selection import train_test_split
+from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import StandardScaler
 
 from train_gap_model import (
     build_representation,
@@ -67,6 +70,16 @@ def make_hgb(params: dict, seed: int) -> HistGradientBoostingRegressor:
         n_iter_no_change=25,
         random_state=seed,
         **params,
+    )
+
+
+def make_linear(seed: int):
+    """ElasticNet baseline matching the sweep's probe (StandardScaler + CV-chosen
+    alpha), so we can compare it to HGB on the exact same split."""
+    return make_pipeline(
+        StandardScaler(),
+        ElasticNetCV(l1_ratio=[0.1, 0.5, 0.9], alphas=50, cv=3,
+                     max_iter=5000, random_state=seed, n_jobs=-1),
     )
 
 
@@ -194,12 +207,17 @@ def main() -> None:
     default_metrics = evaluate(make_hgb({}, args.seed), w_tr, g_tr, w_va, g_va, w_te, g_te)
     tuned_model = make_hgb(study.best_params, args.seed)
     tuned_metrics = evaluate(tuned_model, w_tr, g_tr, w_va, g_va, w_te, g_te)
+    # Same-split linear baseline (mirrors the sweep's ElasticNet probe) so we can
+    # see whether HGB is actually beating the linear model on this representation.
+    linear_metrics = evaluate(make_linear(args.seed), w_tr, g_tr, w_va, g_va, w_te, g_te)
 
-    print("\n=== Overfitting diagnosis (gap_ev) ===")
+    print("\n=== gap_ev on the SAME split: linear vs boosted ===")
+    report("ElasticNet (linear, like the sweep probe)", linear_metrics)
     report("Default booster", default_metrics)
     report("Tuned booster", tuned_metrics)
     print("\nInterpretation: val and test are out-of-sample for NMF, so they should "
-          "agree; a large train−test gap means the booster is overfitting.")
+          "agree. If ElasticNet's test R² ≫ HGB's, the booster is overfitting these "
+          "codes and the linear model is the better final estimator here.")
 
     plot_actual_vs_pred(g_te, tuned_model.predict(w_te), tuned_metrics, args.out_dir)
     plot_learning_curve(study.best_params, w_tr, g_tr, w_va, g_va, args.seed, args.out_dir)
@@ -208,6 +226,7 @@ def main() -> None:
         "representation_trial": trial.number,
         "best_val_r2": study.best_value,
         "best_booster_params": study.best_params,
+        "linear_elasticnet": linear_metrics,
         "default": default_metrics,
         "tuned": tuned_metrics,
     }
