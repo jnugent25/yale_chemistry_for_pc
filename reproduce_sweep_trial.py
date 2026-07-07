@@ -16,6 +16,7 @@ from pathlib import Path
 
 import numpy as np
 import optuna
+from sklearn.metrics import r2_score
 
 from tune_representation import elasticnet_r2
 from train_gap_model import (
@@ -25,6 +26,7 @@ from train_gap_model import (
     make_nmf,
     select_trial,
 )
+from tune_gap_model import make_hgb_preset, make_rf
 
 
 def parse_args() -> argparse.Namespace:
@@ -58,20 +60,43 @@ def sweep_split(n: int, seed: int, val_frac: float) -> tuple[np.ndarray, np.ndar
     return train_idx, val_idx
 
 
-def eval_split(x, gap, logp, cfg, train_idx, val_idx, max_iter) -> tuple[float, float]:
-    """Fit NMF on train, transform val, ElasticNet R² on val — mirrors the objective."""
+def fit_codes(x, cfg, train_idx, val_idx, max_iter) -> tuple[np.ndarray, np.ndarray]:
+    """Fit NMF on train, return (train codes, val codes) — the sweep's representation."""
     nmf = make_nmf(cfg, max_iter)
-    w_tr = nmf.fit_transform(x[train_idx])
-    w_va = nmf.transform(x[val_idx])
+    return nmf.fit_transform(x[train_idx]), nmf.transform(x[val_idx])
 
-    def r2(y: np.ndarray) -> float:
+
+def score_model(model, w_tr, y_tr, w_va, y_va) -> float:
+    """Fit any sklearn regressor on train codes, return val R² (NaN targets dropped)."""
+    tr_m = ~np.isnan(y_tr)
+    va_m = ~np.isnan(y_va)
+    if not tr_m.any() or not va_m.any():
+        return float("nan")
+    model.fit(w_tr[tr_m], y_tr[tr_m])
+    return float(r2_score(y_va[va_m], model.predict(w_va[va_m])))
+
+
+def score_en(w_tr, y_tr, w_va, y_va) -> float:
+    """ElasticNet val R² (the sweep's exact probe), NaN targets dropped."""
+    tr_m = ~np.isnan(y_tr)
+    va_m = ~np.isnan(y_va)
+    if not tr_m.any() or not va_m.any():
+        return float("nan")
+    return elasticnet_r2(w_tr[tr_m], y_tr[tr_m], w_va[va_m], y_va[va_m], random_state=0)
+
+
+def eval_split(x, gap, logp, cfg, train_idx, val_idx, max_iter) -> tuple[float, float]:
+    """ElasticNet gap/logP R² on one split — mirrors the sweep objective exactly."""
+    w_tr, w_va = fit_codes(x, cfg, train_idx, val_idx, max_iter)
+
+    def en_r2(y: np.ndarray) -> float:
         tr_m = ~np.isnan(y[train_idx])
         va_m = ~np.isnan(y[val_idx])
         if not tr_m.any() or not va_m.any():
             return float("nan")
         return elasticnet_r2(w_tr[tr_m], y[train_idx][tr_m], w_va[va_m], y[val_idx][va_m], random_state=0)
 
-    return r2(gap), r2(logp)
+    return en_r2(gap), en_r2(logp)
 
 
 def main() -> None:
@@ -92,12 +117,26 @@ def main() -> None:
     x = build_representation(df, cfg, args.h_step_ppm, args.c_step_ppm)
     print(f"Working set: {len(df)} molecules; representation {x.shape}\n")
 
-    # 1) Exact sweep split — should match the stored value closely.
+    # 1) Exact sweep split — reproduce ElasticNet, then compare other models on it.
     tr, va = sweep_split(len(df), args.seed, args.val_frac)
-    gap_r2, logp_r2 = eval_split(x, gap, logp, cfg, tr, va, args.max_iter)
+    w_tr, w_va = fit_codes(x, cfg, tr, va, args.max_iter)
+    gap_tr, gap_va = gap[tr], gap[va]
+    logp_tr, logp_va = logp[tr], logp[va]
+
+    en_gap = score_en(w_tr, gap_tr, w_va, gap_va)
+    en_logp = score_en(w_tr, logp_tr, w_va, logp_va)
     print(f"Reproduced on the EXACT sweep split (seed {args.seed}):")
-    print(f"  gap R²  = {gap_r2:.4f}   (stored {stored_gap:.4f}, diff {gap_r2 - stored_gap:+.4f})")
-    print(f"  logP R² = {logp_r2:.4f}   (stored {stored_logp:.4f}, diff {logp_r2 - stored_logp:+.4f})")
+    print(f"  ElasticNet gap R²  = {en_gap:.4f}   (stored {stored_gap:.4f}, diff {en_gap - stored_gap:+.4f})")
+    print(f"  ElasticNet logP R² = {en_logp:.4f}   (stored {stored_logp:.4f}, diff {en_logp - stored_logp:+.4f})")
+
+    # Same split, same NMF codes — swap in RF and the shallow HGB to see if the
+    # model choice, not the representation, is what moves gap R².
+    rf_gap = score_model(make_rf(args.seed), w_tr, gap_tr, w_va, gap_va)
+    hgb_gap = score_model(make_hgb_preset(args.seed), w_tr, gap_tr, w_va, gap_va)
+    print("\ngap R² on the SAME exact split, by model:")
+    print(f"  ElasticNet (sweep probe)          = {en_gap:.4f}")
+    print(f"  Random forest (regularized)       = {rf_gap:.4f}")
+    print(f"  HGB preset (depth 4, 200 trees)   = {hgb_gap:.4f}")
 
     # 2) Optional: different random splits, to show variance + selection bias.
     if args.n_reseeds > 0:
