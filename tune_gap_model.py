@@ -24,7 +24,7 @@ matplotlib.use("Agg")  # headless: write PNGs without a display (works over SSH)
 import matplotlib.pyplot as plt
 import numpy as np
 import optuna
-from sklearn.ensemble import HistGradientBoostingRegressor
+from sklearn.ensemble import HistGradientBoostingRegressor, RandomForestRegressor
 from sklearn.linear_model import ElasticNetCV
 from sklearn.metrics import r2_score, root_mean_squared_error
 from sklearn.model_selection import train_test_split
@@ -70,6 +70,19 @@ def make_hgb(params: dict, seed: int) -> HistGradientBoostingRegressor:
         n_iter_no_change=25,
         random_state=seed,
         **params,
+    )
+
+
+def make_rf(seed: int) -> RandomForestRegressor:
+    """Random forest with modest regularization (shallow-ish via min_samples_leaf,
+    subsampled features). Bagging generalizes better than boosting when the codes
+    carry smooth, limited signal. No HPO — sensible fixed settings."""
+    return RandomForestRegressor(
+        n_estimators=500,
+        max_features=0.33,
+        min_samples_leaf=10,
+        n_jobs=-1,
+        random_state=seed,
     )
 
 
@@ -207,12 +220,14 @@ def main() -> None:
     default_metrics = evaluate(make_hgb({}, args.seed), w_tr, g_tr, w_va, g_va, w_te, g_te)
     tuned_model = make_hgb(study.best_params, args.seed)
     tuned_metrics = evaluate(tuned_model, w_tr, g_tr, w_va, g_va, w_te, g_te)
-    # Same-split linear baseline (mirrors the sweep's ElasticNet probe) so we can
-    # see whether HGB is actually beating the linear model on this representation.
+    # Same-split baselines: linear (mirrors the sweep probe) and a regularized RF,
+    # so we can see which final estimator actually generalizes on this representation.
     linear_metrics = evaluate(make_linear(args.seed), w_tr, g_tr, w_va, g_va, w_te, g_te)
+    rf_metrics = evaluate(make_rf(args.seed), w_tr, g_tr, w_va, g_va, w_te, g_te)
 
-    print("\n=== gap_ev on the SAME split: linear vs boosted ===")
+    print("\n=== gap_ev on the SAME split: linear vs RF vs boosted ===")
     report("ElasticNet (linear, like the sweep probe)", linear_metrics)
+    report("Random forest (regularized, no HPO)", rf_metrics)
     report("Default booster", default_metrics)
     report("Tuned booster", tuned_metrics)
     print("\nInterpretation: val and test are out-of-sample for NMF, so they should "
@@ -227,6 +242,7 @@ def main() -> None:
         "best_val_r2": study.best_value,
         "best_booster_params": study.best_params,
         "linear_elasticnet": linear_metrics,
+        "random_forest": rf_metrics,
         "default": default_metrics,
         "tuned": tuned_metrics,
     }
