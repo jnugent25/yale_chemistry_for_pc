@@ -10,7 +10,7 @@ import sys
 sys.path.append("/Users/jacknugent/Desktop/yale_chemistry_project")
 from create_nmr_dictionary_features import build_soft_peak_matrix, _make_grid, NMRDictionaryConfig
 
-def plot_aromatic_examples(data_path: Path, output_image: Path = Path("aromatic_nmr_examples.png"), num_examples: int = 3):
+def plot_aromatic_examples(data_path: Path, output_image: Path = Path("figures/aromatic_nmr_examples.png"), num_examples: int = 3):
     print(f"Loading dataset from {data_path}...")
     df = pd.read_pickle(data_path)
     

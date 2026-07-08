@@ -5,7 +5,7 @@ from pathlib import Path
 
 # Paths to the model and output plot
 MODEL_PATH = Path("/Users/jacknugent/Downloads/ids_nmr_1k_dictionary_model.pkl")
-OUTPUT_PLOT = Path("nmf_components_plot_kld_nnsvda_10k_ids_nmr.png")
+OUTPUT_PLOT = Path("figures/nmf_components_plot_kld_nnsvda_10k_ids_nmr.png")
 
 def plot_nmf_components(model_path: Path, comp_indices: list[int] | None = None, output_plot: Path = OUTPUT_PLOT):
     if not model_path.exists():
@@ -81,6 +81,6 @@ if __name__ == "__main__":
     plot_nmf_components(
         MODEL_PATH, 
         comp_indices=top_shap_components, 
-        output_plot=Path("top_shap_nmf_components.png")
+        output_plot=Path("figures/top_shap_nmf_components.png")
     )
 

@@ -9,7 +9,7 @@ from create_nmr_dictionary_features import build_soft_peak_matrix
 FEATURES_PATH = Path("/Users/jacknugent/Downloads/ids_nmr_1k_dictionary_features.pkl")
 MODEL_PATH = Path("/Users/jacknugent/Downloads/ids_nmr_1k_dictionary_model.pkl")
 ORIGINAL_DATA_PATH = Path("/Users/jacknugent/Downloads/nmr_gaussian_ids_features_1k.pkl")
-OUTPUT_PLOT = Path("nmf_reconstruction_plot.png")
+OUTPUT_PLOT = Path("figures/nmf_reconstruction_plot.png")
 
 def plot_reconstruction(features_path: Path, model_path: Path, original_data_path: Path, sample_idx: int = 0):
     if not (features_path.exists() and model_path.exists() and original_data_path.exists()):
