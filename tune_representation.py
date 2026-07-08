@@ -177,6 +177,35 @@ def elasticnet_r2(
     return float(r2_score(y_test, model.predict(x_test)))
 
 
+def rf_r2(
+    x_train: np.ndarray,
+    y_train: np.ndarray,
+    x_test: np.ndarray,
+    y_test: np.ndarray,
+    random_state: int,
+) -> float:
+    """Random-forest probe: tunes the representation for the nonlinear model we
+    actually use downstream, instead of a linear decoder. Settings match the
+    final RF (train_gap_model.make_rf)."""
+    from sklearn.ensemble import RandomForestRegressor
+
+    model = RandomForestRegressor(
+        n_estimators=500, max_features=0.33, min_samples_leaf=10,
+        n_jobs=-1, random_state=random_state,
+    )
+    model.fit(x_train, y_train)
+    return float(r2_score(y_test, model.predict(x_test)))
+
+
+def probe_r2(probe: str, *args) -> float:
+    """Dispatch the regression probe used for the gap/logP objectives."""
+    if probe == "elasticnet":
+        return elasticnet_r2(*args)
+    if probe == "rf":
+        return rf_r2(*args)
+    raise ValueError(f"Unknown probe: {probe}")
+
+
 def logp_targets(smiles: pd.Series) -> np.ndarray:
     from rdkit import Chem
     from rdkit.Chem import Crippen
@@ -228,13 +257,24 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--n-trials", type=int, default=50,
                    help="Target TOTAL number of trials in the study; on resume, only the "
                         "remaining trials are run.")
-    p.add_argument("--out", type=Path, default=Path("/Users/jacknugent/Downloads/alberts_gap_repr_sweep.json"))
+    p.add_argument("--probe", choices=["elasticnet", "rf"], default="elasticnet",
+                   help="Regression probe for the gap/logP objectives. 'rf' tunes the "
+                        "representation for the nonlinear model used downstream.")
+    # Defaults for these are derived from --probe (below) so elasticnet and rf runs
+    # never share a study file / name — keeps the two searches fully separate.
+    p.add_argument("--out", type=Path, default=None,
+                   help="Results JSON. Default: alberts_gap_repr_sweep_<probe>.json")
     p.add_argument("--storage", type=Path, default=None,
                    help="SQLite file backing the Optuna study for resumability. "
                         "Defaults to <out>.db next to --out.")
-    p.add_argument("--study-name", type=str, default="nmf_repr",
-                   help="Optuna study name; reused to resume an existing study in --storage.")
-    return p.parse_args()
+    p.add_argument("--study-name", type=str, default=None,
+                   help="Optuna study name; reused to resume. Default: nmf_repr_<probe>.")
+    args = p.parse_args()
+    if args.out is None:
+        args.out = Path(f"/Users/jacknugent/Downloads/alberts_gap_repr_sweep_{args.probe}.json")
+    if args.study_name is None:
+        args.study_name = f"nmf_repr_{args.probe}"
+    return args
 
 
 def main() -> None:
@@ -417,18 +457,20 @@ def main() -> None:
         # Target 2: logP R^2 on val (dataset logP)
         lp_tr_mask = ~np.isnan(logp[train_idx])
         lp_va_mask = ~np.isnan(logp[val_idx])
-        logp_r2 = elasticnet_r2(
+        logp_r2 = probe_r2(
+            args.probe,
             w_tr[lp_tr_mask], logp[train_idx][lp_tr_mask],
-            w_va[lp_va_mask], logp[val_idx][lp_va_mask], random_state=0,
+            w_va[lp_va_mask], logp[val_idx][lp_va_mask], 0,
         )
 
         # Primary target: gap_ev R^2 on val
         gap_tr_mask = ~np.isnan(gap[train_idx])
         gap_va_mask = ~np.isnan(gap[val_idx])
         if gap_tr_mask.any() and gap_va_mask.any():
-            gap_r2 = elasticnet_r2(
+            gap_r2 = probe_r2(
+                args.probe,
                 w_tr[gap_tr_mask], gap[train_idx][gap_tr_mask],
-                w_va[gap_va_mask], gap[val_idx][gap_va_mask], random_state=0,
+                w_va[gap_va_mask], gap[val_idx][gap_va_mask], 0,
             )
         else:
             gap_r2 = float("nan")
@@ -467,7 +509,7 @@ def main() -> None:
 
     already = len(study.trials)
     remaining = max(0, args.n_trials - already)
-    print(f"Study '{args.study_name}' @ {storage_path}")
+    print(f"Probe: {args.probe}  |  Study '{args.study_name}' @ {storage_path}")
     print(f"  {already} existing trials; running {remaining} more to reach {args.n_trials}.\n")
 
     # Rewrite the JSON after every finished trial (from the persisted study).
