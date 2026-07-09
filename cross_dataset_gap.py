@@ -29,7 +29,7 @@ from train_gap_model import (
     make_nmf,
     select_trial,
 )
-from tune_gap_model import make_hgb_preset, make_linear, make_rf
+from nmrlib.models import make_hgb_preset, make_linear, make_rf
 
 
 def parse_args() -> argparse.Namespace:

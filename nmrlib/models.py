@@ -12,10 +12,10 @@ import pandas as pd
 from sklearn.base import clone
 from sklearn.cross_decomposition import PLSRegression
 from sklearn.ensemble import HistGradientBoostingRegressor, RandomForestRegressor
-from sklearn.linear_model import ElasticNet, LinearRegression
+from sklearn.linear_model import ElasticNet, ElasticNetCV, LinearRegression
 from sklearn.model_selection import KFold, cross_validate, train_test_split
 from sklearn.neighbors import KNeighborsRegressor
-from sklearn.pipeline import Pipeline
+from sklearn.pipeline import Pipeline, make_pipeline
 from sklearn.preprocessing import StandardScaler
 
 from nmrlib.metrics import regression_metrics
@@ -43,6 +43,55 @@ def default_models(seed: int = 42) -> dict[str, Pipeline]:
             )),
         ]),
     }
+
+
+def make_hgb(params: dict, seed: int) -> HistGradientBoostingRegressor:
+    """HPO-tunable HGB with early stopping (caps trees via an internal validation
+    split — an overfitting guard independent of the tuned knobs)."""
+    return HistGradientBoostingRegressor(
+        max_iter=1000,
+        early_stopping=True,
+        validation_fraction=0.1,
+        n_iter_no_change=25,
+        random_state=seed,
+        **params,
+    )
+
+
+def make_hgb_preset(seed: int) -> HistGradientBoostingRegressor:
+    """Shallow, few-tree HGB from an external grid search — heavily regularized
+    (max_depth=4, max_iter=200), so it overfits much less. Fixed params, no HPO."""
+    return HistGradientBoostingRegressor(
+        learning_rate=0.07,
+        max_depth=4,
+        max_iter=200,
+        min_samples_leaf=20,
+        l2_regularization=1.0,
+        random_state=seed,
+    )
+
+
+def make_rf(seed: int) -> RandomForestRegressor:
+    """Random forest with modest regularization (shallow-ish via min_samples_leaf,
+    subsampled features). Bagging generalizes better than boosting when the codes
+    carry smooth, limited signal. No HPO — sensible fixed settings."""
+    return RandomForestRegressor(
+        n_estimators=500,
+        max_features=0.33,
+        min_samples_leaf=10,
+        n_jobs=-1,
+        random_state=seed,
+    )
+
+
+def make_linear(seed: int):
+    """ElasticNet baseline matching the sweep's probe (StandardScaler + CV-chosen
+    alpha), for comparison against HGB on the exact same split."""
+    return make_pipeline(
+        StandardScaler(),
+        ElasticNetCV(l1_ratio=[0.1, 0.5, 0.9], alphas=50, cv=3,
+                     max_iter=5000, random_state=seed, n_jobs=-1),
+    )
 
 
 def grid_search_space(n_features: int, seed: int = 42) -> tuple[Pipeline, list[dict]]:

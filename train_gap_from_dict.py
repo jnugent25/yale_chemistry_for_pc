@@ -36,7 +36,7 @@ from create_nmr_dictionary_features import _invert_transform, _make_grid
 from cross_dataset_gap import canonical_smiles
 from tune_representation import assemble_x, build_raw_matrices
 from train_gap_model import config_from_params, load_working_set, make_nmf
-from tune_gap_model import make_hgb
+from nmrlib.models import make_hgb
 
 
 def parse_args() -> argparse.Namespace:

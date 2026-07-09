@@ -11,4 +11,29 @@ Single source of truth for the pieces the notebooks kept re-implementing:
 from nmrlib.data import DATASETS, load_dataset, resolve_dataset
 from nmrlib.features import feature_sets, featurize, nmf_cols
 from nmrlib.metrics import regression_metrics
-from nmrlib.models import compare_feature_sets, default_models, grid_search_space
+from nmrlib.models import (
+    compare_feature_sets,
+    default_models,
+    grid_search_space,
+    make_hgb,
+    make_hgb_preset,
+    make_linear,
+    make_rf,
+)
+
+__all__ = [
+    "DATASETS",
+    "load_dataset",
+    "resolve_dataset",
+    "feature_sets",
+    "featurize",
+    "nmf_cols",
+    "regression_metrics",
+    "compare_feature_sets",
+    "default_models",
+    "grid_search_space",
+    "make_hgb",
+    "make_hgb_preset",
+    "make_linear",
+    "make_rf",
+]
