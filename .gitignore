@@ -16,3 +16,7 @@ wheels/
 *.pkl
 Datasets/
 
+# Sweep artifacts (Optuna SQLite studies + result JSON)
+sweeps/
+*.db
+

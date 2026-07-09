@@ -29,8 +29,12 @@ lookup), so predictions are explainable.
    a target to see which representation carries the most signal.
 3. **`ml_workflow.ipynb`** — grid-search models on one feature set, evaluate on a
    held-out test set, interpret with SHAP, visualize the top NMF motifs.
+4. **`tune_nmf_representation.ipynb`** — control panel for the NMF sweep:
+   documents every tunable option, runs `tune_representation.py` (resumable
+   subprocess), and analyzes the study (Pareto front, best config, knob
+   importances) before handing the best trial to the training scripts.
 
-All three are **thin drivers**: switch datasets/targets in the single config
+All four are **thin drivers**: switch datasets/targets in the single config
 cell. Feature-set columns and metrics come from `nmrlib`, so nothing drifts
 between notebooks.
 
