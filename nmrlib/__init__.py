@@ -8,7 +8,7 @@ Single source of truth for the pieces the notebooks kept re-implementing:
 - ``nmrlib.models``   — model templates, grid-search space, feature-set comparison loop
 """
 
-from nmrlib.data import DATASETS, load_dataset, resolve_dataset
+from nmrlib.data import DATASETS, describe_datasets, load_dataset, resolve_dataset
 from nmrlib.features import feature_sets, featurize, nmf_cols
 from nmrlib.metrics import regression_metrics
 from nmrlib.models import (
@@ -23,6 +23,7 @@ from nmrlib.models import (
 
 __all__ = [
     "DATASETS",
+    "describe_datasets",
     "load_dataset",
     "resolve_dataset",
     "feature_sets",

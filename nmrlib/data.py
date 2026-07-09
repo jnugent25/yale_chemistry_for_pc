@@ -7,6 +7,7 @@ regardless of which source pickle the frame came from.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 
 import pandas as pd
@@ -15,24 +16,50 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = REPO_ROOT / "Datasets"
 DOWNLOADS_DIR = Path.home() / "Downloads"
 
-# Short name -> pickle filename. Files are looked up in Datasets/ first,
-# then ~/Downloads as a fallback for pickles not yet moved into the repo.
-DATASETS: dict[str, str] = {
-    # Alberts et al. 10k subset merged with qchem targets (gap/homo/lumo)
-    "alberts_10k": "alberts_nmr_qchem_merged.pkl",
-    # Alberts 10k with logP, pre-featurization input for create_features_nmr
-    "alberts_10k_logp": "alberts_merged_10k_with_logp.pkl",
-    # Alberts 10k with NMF codes from the dictionary fit on the 100k corpus
-    "alberts_10k_100kdict": "alberts_10k_100kdict_nmf_features.pkl",
-    # IDS NMR corpora (unlabeled spectra for dictionary learning)
-    "ids_nmr_1k": "ids_nmr_1k.pkl",
-    "ids_nmr_10k": "ids_nmr_10k.pkl",
-    "ids_nmr_100k": "ids_nmr_100k.pkl",
-    # IDS 1k, fully featurized with the 115-component NMF + other feature sets
-    "ids_1k_featurized": "ids_1k_nmf_115_and_other.pkl",
-    "ids_1k_tuned_nmf": "ids_nmr_1k_tuned_nmf_features.pkl",
-    # Gaussian-matched 1k set with NMR
-    "gaussian_1k": "gaussian_nmr_matched_1k.pkl",
+
+@dataclass(frozen=True)
+class DatasetInfo:
+    """One registry entry: the pickle filename and a human description."""
+
+    filename: str
+    description: str
+
+
+# Short name -> (pickle filename, description). Files are looked up in
+# Datasets/ first, then ~/Downloads as a fallback for pickles not yet moved
+# into the repo. Use describe_datasets() to see this with local availability.
+DATASETS: dict[str, DatasetInfo] = {
+    "alberts_10k": DatasetInfo(
+        "alberts_nmr_qchem_merged.pkl",
+        "Alberts et al. 10k subset merged with qchem targets (gap/homo/lumo).",
+    ),
+    "alberts_10k_logp": DatasetInfo(
+        "alberts_merged_10k_with_logp.pkl",
+        "Alberts 10k with logP; raw spectra, pre-featurization input.",
+    ),
+    "alberts_10k_100kdict": DatasetInfo(
+        "alberts_10k_100kdict_nmf_features.pkl",
+        "Alberts 10k with NMF codes from the dictionary fit on the 100k corpus.",
+    ),
+    "ids_nmr_1k": DatasetInfo(
+        "ids_nmr_1k.pkl", "IDS NMR corpus, 1k unlabeled spectra for dictionary learning."
+    ),
+    "ids_nmr_10k": DatasetInfo(
+        "ids_nmr_10k.pkl", "IDS NMR corpus, 10k unlabeled spectra for dictionary learning."
+    ),
+    "ids_nmr_100k": DatasetInfo(
+        "ids_nmr_100k.pkl", "IDS NMR corpus, 100k unlabeled spectra for dictionary learning."
+    ),
+    "ids_1k_featurized": DatasetInfo(
+        "ids_1k_nmf_115_and_other.pkl",
+        "IDS 1k fully featurized (115-component NMF + An 2014, 13C bins, stats).",
+    ),
+    "ids_1k_tuned_nmf": DatasetInfo(
+        "ids_nmr_1k_tuned_nmf_features.pkl", "IDS 1k with tuned-NMF dictionary codes."
+    ),
+    "gaussian_1k": DatasetInfo(
+        "gaussian_nmr_matched_1k.pkl", "Gaussian-matched 1k set with NMR spectra."
+    ),
 }
 
 # Canonical column name -> aliases seen across source datasets.
@@ -49,7 +76,7 @@ def resolve_dataset(name_or_path: str | Path) -> Path:
     candidates: list[Path] = []
     key = str(name_or_path)
     if key in DATASETS:
-        filename = DATASETS[key]
+        filename = DATASETS[key].filename
         candidates = [DATA_DIR / filename, DOWNLOADS_DIR / filename]
     else:
         p = Path(name_or_path).expanduser()
@@ -63,6 +90,27 @@ def resolve_dataset(name_or_path: str | Path) -> Path:
         f"Could not find dataset {name_or_path!r}. Tried:\n  {tried}\n"
         f"Known dataset names: {known}"
     )
+
+
+def describe_datasets() -> pd.DataFrame:
+    """Registry table (name, description, filename, whether found locally).
+
+    Handy at the top of a notebook to see which dataset short names are
+    available before choosing one in the config cell.
+    """
+    rows = []
+    for name, info in DATASETS.items():
+        try:
+            found = str(resolve_dataset(name).parent.name) + "/"
+        except FileNotFoundError:
+            found = "—"
+        rows.append({
+            "name": name,
+            "description": info.description,
+            "file": info.filename,
+            "found_in": found,
+        })
+    return pd.DataFrame(rows).set_index("name")
 
 
 def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
