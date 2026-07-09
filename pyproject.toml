@@ -1,7 +1,7 @@
 [project]
 name = "yale-chemistry-project"
 version = "0.1.0"
-description = "Add your description here"
+description = "NMR-based NMF representation learning for molecular property prediction"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
