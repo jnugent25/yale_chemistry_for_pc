@@ -245,6 +245,54 @@ def dump_results(study: optuna.Study, path: Path) -> None:
     path.write_text(json.dumps(rows, indent=2))
 
 
+# Representation losses that need the torch engine's geomloss OT/MMD path (and a
+# SpectralGeometry). Everything else (frobenius/kl) is pointwise.
+OT_FAMILIES = {"sinkhorn", "sinkhorn_unbalanced", "energy", "gaussian", "laplacian"}
+
+
+def _suggest_repr_loss(trial: optuna.Trial, args: argparse.Namespace) -> str:
+    """Pick the representation loss for this trial. sklearn is always frobenius/CD;
+    torch searches over --losses (a categorical only when more than one is given)."""
+    if args.engine == "sklearn":
+        return "frobenius"
+    if len(args.losses) == 1:
+        return args.losses[0]
+    return trial.suggest_categorical("repr_loss", args.losses)
+
+
+def build_torch_engine(trial, repr_loss, cfg, h_grid, c_grid, args):
+    """Construct a TorchNMF (Adam, GPU) for `repr_loss`, suggesting the loss-specific
+    knobs. Imported lazily so sklearn runs never pull in torch."""
+    from nmrlib.torch_nmf import TorchNMF, TorchNMFConfig, SpectralGeometry
+
+    common = dict(
+        n_components=cfg.n_components, alpha_W=cfg.alpha_W, alpha_H=cfg.alpha_H,
+        l1_ratio=cfg.l1_ratio, optimizer="adam", lr=args.torch_lr,
+        n_iter=args.torch_n_iter, transform_n_iter=args.torch_n_iter,
+        device=args.torch_device, dtype="float32",
+    )
+    if repr_loss in ("frobenius", "kl"):
+        return TorchNMF(TorchNMFConfig(loss=repr_loss, **common), geometry=None)
+
+    # geomloss OT / MMD family. h_multiplicity is off for these (see objective), so
+    # the H block is single-channel and its width == len(h_grid).
+    ot_loss = "sinkhorn" if repr_loss.startswith("sinkhorn") else repr_loss
+    reach = trial.suggest_float("reach", 0.05, 0.5, log=True) if repr_loss == "sinkhorn_unbalanced" else None
+    p = trial.suggest_categorical("sinkhorn_p", [1, 2]) if ot_loss == "sinkhorn" else 2
+    h_blur = c_blur = None
+    if ot_loss in ("sinkhorn", "gaussian", "laplacian"):
+        # Normalized-span units: H peaks are much narrower than C, so search them apart.
+        h_blur = trial.suggest_float("h_blur", 0.005, 0.1, log=True)
+        c_blur = trial.suggest_float("c_blur", 0.02, 0.3, log=True)
+    geom = SpectralGeometry(
+        h_coords=h_grid, c_coords=c_grid,
+        h_modality_weight=cfg.h_modality_weight, c_modality_weight=cfg.c_modality_weight,
+    )
+    tcfg = TorchNMFConfig(loss="geomloss", ot_loss=ot_loss, reach=reach, sinkhorn_p=p,
+                          h_blur=h_blur, c_blur=c_blur, **common)
+    return TorchNMF(tcfg, geometry=geom)
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Tune NMF representation (gap_ev-primary, recon+FG+logP guardrails).")
     p.add_argument("--raw-data", type=Path, default=Path("/Users/jacknugent/Downloads/alberts_merged_10k.pkl"))
@@ -260,6 +308,17 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--probe", choices=["elasticnet", "rf"], default="elasticnet",
                    help="Regression probe for the gap/logP objectives. 'rf' tunes the "
                         "representation for the nonlinear model used downstream.")
+    p.add_argument("--engine", choices=["sklearn", "torch"], default="sklearn",
+                   help="NMF engine. sklearn = coordinate descent on CPU (frobenius, no mu). "
+                        "torch = Adam gradient descent on GPU; enables the geomloss OT losses "
+                        "and is much faster on large data.")
+    p.add_argument("--losses", nargs="+", default=["frobenius"],
+                   choices=["frobenius", "kl", "sinkhorn", "sinkhorn_unbalanced", "energy", "gaussian", "laplacian"],
+                   help="(torch engine) representation loss(es) to search. Give several to let "
+                        "the sweep tune which loss maximizes downstream R². Ignored for sklearn.")
+    p.add_argument("--torch-device", default=None, help="torch device (default: auto cuda>mps>cpu).")
+    p.add_argument("--torch-n-iter", type=int, default=300, help="Adam iterations per torch NMF fit.")
+    p.add_argument("--torch-lr", type=float, default=0.05, help="Adam learning rate (torch engine).")
     # Defaults for these are derived from --probe (below) so elasticnet and rf runs
     # never share a study file / name — keeps the two searches fully separate.
     p.add_argument("--out", type=Path, default=None,
@@ -270,10 +329,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--study-name", type=str, default=None,
                    help="Optuna study name; reused to resume. Default: nmf_repr_<probe>.")
     args = p.parse_args()
+    # Fold engine into the default out/study name so sklearn and torch studies never
+    # collide (sklearn keeps the original names for continuity with existing .db files).
+    tag = args.probe if args.engine == "sklearn" else f"{args.probe}_torch"
     if args.out is None:
-        args.out = Path(f"/Users/jacknugent/Downloads/alberts_gap_repr_sweep_{args.probe}.json")
+        args.out = Path(f"/Users/jacknugent/Downloads/alberts_gap_repr_sweep_{tag}.json")
     if args.study_name is None:
-        args.study_name = f"nmf_repr_{args.probe}"
+        args.study_name = f"nmf_repr_{tag}"
     return args
 
 
@@ -346,6 +408,10 @@ def main() -> None:
     max_cache_entries = 3
 
     def objective(trial: optuna.Trial) -> float:
+        # Representation loss / engine. sklearn -> CD frobenius (no mu); torch -> Adam
+        # on GPU for any loss, including the geomloss OT families.
+        repr_loss = _suggest_repr_loss(trial, args)
+        is_ot = repr_loss in OT_FAMILIES
         # Integer (not categorical) so TPE sees the ordering; recon improves with
         # more atoms but downstream regression overfits past a point.
         nc = trial.suggest_int("n_components", 10, 120, step=5)
@@ -356,19 +422,21 @@ def main() -> None:
         # Per-peak physical-width scaling (only used when use_peak_width=True).
         h_width_scale = trial.suggest_float("h_width_scale", 0.1, 1.0, step=0.1)
         c_width_scale = trial.suggest_float("c_width_scale", 0.5, 2.0, step=0.5)
-        h_multiplicity = trial.suggest_categorical("h_multiplicity", [True, False])
+        # OT losses treat each block as a distribution over its ppm grid; the
+        # multichannel (per-multiplicity) H layout has no single ppm axis, so it's
+        # disabled for OT. Pointwise losses (frobenius/kl) keep the choice.
+        h_multiplicity = False if is_ot else trial.suggest_categorical("h_multiplicity", [True, False])
         use_peak_width = trial.suggest_categorical("use_peak_width", [True, False])
         intensity_transform = trial.suggest_categorical("intensity_transform", ["none", "sqrt", "cbrt", "log1p", "arcsinh"])
         # H/C balance: C is pinned to 1.0, so this is the H:C ratio. Log-scaled and
         # spanning both sides of 1.0 because H and C blocks have unequal total norm.
         h_modality_weight = trial.suggest_float("h_modality_weight", 0.1, 10.0, log=True)
 
-        solver = trial.suggest_categorical("solver", ["cd", "mu"])
-        # KL/IS divergence needs the mu solver; cd is frobenius-only.
-        if solver == "mu":
-            beta_loss = trial.suggest_categorical("beta_loss", ["frobenius", "kullback-leibler"])
-        else:
-            beta_loss = "frobenius"
+        # Solver is pinned to sklearn's coordinate descent (mu handles L1 sparsity
+        # poorly). The torch engine ignores these fields (it uses Adam); they only
+        # feed the sklearn path, where cd is frobenius-only.
+        solver = "cd"
+        beta_loss = "frobenius"
         # Sparsity is searched for BOTH solvers. alpha_W sparsifies the codes
         # (feature selection for the gap_ev regressor), alpha_H sparsifies the
         # dictionary (interpretable spectral motifs). sklearn scales these by
@@ -411,26 +479,32 @@ def main() -> None:
         x_tr, x_va = x[train_idx], x[val_idx]
         h_va, c_va = h[val_idx], c[val_idx]
 
-        print(f"[fit ] {cfg.name}: NMF n_components={cfg.n_components} (train only) ...", flush=True)
-        nmf = NMF(
-            n_components=cfg.n_components,
-            init="nndsvda",
-            solver=cfg.solver,
-            beta_loss=cfg.beta_loss,
-            alpha_W=cfg.alpha_W,
-            alpha_H=cfg.alpha_H,
-            l1_ratio=cfg.l1_ratio,
-            max_iter=args.max_iter,
-            random_state=0,
-        )
+        print(f"[fit ] {cfg.name}: {args.engine}/{repr_loss} n_components={cfg.n_components} (train only) ...", flush=True)
         try:
-            w_tr = nmf.fit_transform(x_tr)
-            w_va = nmf.transform(x_va)
-        except ValueError as exc:
-            # Over-regularization can collapse the dictionary to all zeros;
-            # sklearn then raises on transform. Treat as a bad trial, not a crash.
+            if args.engine == "sklearn":
+                nmf = NMF(
+                    n_components=cfg.n_components,
+                    init="nndsvda",
+                    solver=cfg.solver,
+                    beta_loss=cfg.beta_loss,
+                    alpha_W=cfg.alpha_W,
+                    alpha_H=cfg.alpha_H,
+                    l1_ratio=cfg.l1_ratio,
+                    max_iter=args.max_iter,
+                    random_state=0,
+                )
+                w_tr = nmf.fit_transform(x_tr)
+                w_va = nmf.transform(x_va)
+                comps = nmf.components_
+            else:
+                engine = build_torch_engine(trial, repr_loss, cfg, h_grid, c_grid, args)
+                w_tr = engine.fit_transform(x_tr)
+                w_va = engine.transform(x_va)
+                comps = engine.components_
+        except (ValueError, FloatingPointError) as exc:
+            # Over-regularization can collapse the dictionary (sklearn raises on
+            # transform); OT under-conditioning can go non-finite. Bad trial, not a crash.
             raise optuna.TrialPruned(f"degenerate NMF fit: {exc}") from exc
-        comps = nmf.components_
 
         # Held-out reconstruction (primary metric, evaluated in original intensity space)
         h_width = h.shape[1]
@@ -485,6 +559,7 @@ def main() -> None:
         trial.set_user_attr("val_rel_recon_err", rel_err)
         trial.set_user_attr("fg_micro_f1", micro)
         trial.set_user_attr("fg_macro_f1", macro)
+        trial.set_user_attr("repr_loss", repr_loss)
 
         # Both objectives must be finite to place the trial on the Pareto front.
         if np.isnan(gap_r2) or np.isnan(logp_r2):
@@ -509,6 +584,7 @@ def main() -> None:
 
     already = len(study.trials)
     remaining = max(0, args.n_trials - already)
+    print(f"Engine: {args.engine}  |  Losses: {args.losses if args.engine == 'torch' else ['frobenius']}")
     print(f"Probe: {args.probe}  |  Study '{args.study_name}' @ {storage_path}")
     print(f"  {already} existing trials; running {remaining} more to reach {args.n_trials}.\n")
 

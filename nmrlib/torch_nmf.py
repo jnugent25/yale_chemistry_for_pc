@@ -101,6 +101,11 @@ class TorchNMFConfig:
     # more stable; smaller = closer to exact Wasserstein but harder to optimize (and
     # NaN-prone — see normalize_coords). (For gaussian/laplacian it's the kernel sigma.)
     blur: float = 0.05
+    # Per-block blur override. H peaks (~0.01-0.1 ppm on a 12 ppm window) need a finer
+    # scale than C peaks (~1-5 ppm on 220 ppm), so a single blur can't resolve both.
+    # None => fall back to `blur`. Units follow normalize_coords (fraction of span).
+    h_blur: Optional[float] = None
+    c_blur: Optional[float] = None
     sinkhorn_p: Literal[1, 2] = 2          # ground metric |x-y|^p (sinkhorn/hausdorff)
     # Rescale each block's ppm coords to [0,1] before computing OT. Strongly
     # recommended: the C grid spans 0-220 ppm, so a raw p=2 cost hits ~2.4e4 and the
@@ -235,15 +240,20 @@ def _make_geomloss(cfg: TorchNMFConfig) -> ReconstructionLoss:
 
     # reach/scaling/debias are Sinkhorn/Hausdorff knobs; geomloss accepts (and
     # ignores) them for the MMD families, so we can pass them unconditionally.
-    sample_loss = SamplesLoss(
-        loss=cfg.ot_loss,
-        p=cfg.sinkhorn_p,
-        blur=cfg.blur,
-        reach=cfg.reach,               # None => balanced OT; set => unbalanced
-        scaling=cfg.sinkhorn_scaling,
-        debias=cfg.debias,
-        backend=backend,
-    )
+    # blur is set at construction, so per-block blur => one SamplesLoss per block.
+    def _samples_loss(block_blur: float) -> "SamplesLoss":
+        return SamplesLoss(
+            loss=cfg.ot_loss,
+            p=cfg.sinkhorn_p,
+            blur=block_blur,
+            reach=cfg.reach,           # None => balanced OT; set => unbalanced
+            scaling=cfg.sinkhorn_scaling,
+            debias=cfg.debias,
+            backend=backend,
+        )
+
+    sl_h = _samples_loss(cfg.h_blur if cfg.h_blur is not None else cfg.blur)
+    sl_c = _samples_loss(cfg.c_blur if cfg.c_blur is not None else cfg.blur)
 
     # Auto mass-normalization: on when balanced (equal-mass constraint), off when
     # unbalanced so raw peak intensities / concentration survive the compare.
@@ -261,7 +271,7 @@ def _make_geomloss(cfg: TorchNMFConfig) -> ReconstructionLoss:
             stacklevel=2,
         )
 
-    def _block_ot(a: Tensor, b: Tensor, coords: Tensor) -> Tensor:
+    def _block_ot(a: Tensor, b: Tensor, coords: Tensor, sample_loss: "SamplesLoss") -> Tensor:
         """geomloss distance between two batches of intensity vectors over `coords`.
 
         a, b: (batch, n_bins) >= 0 ; coords: (n_bins, 1). When `normalize`, rows are
@@ -302,8 +312,8 @@ def _make_geomloss(cfg: TorchNMFConfig) -> ReconstructionLoss:
         xc_true = x[:, hw:] / geometry.c_modality_weight
         xh_pred = x_hat[:, :hw] / geometry.h_modality_weight
         xc_pred = x_hat[:, hw:] / geometry.c_modality_weight
-        loss_h = _block_ot(xh_true, xh_pred, h_coords)
-        loss_c = _block_ot(xc_true, xc_pred, c_coords)
+        loss_h = _block_ot(xh_true, xh_pred, h_coords, sl_h)
+        loss_c = _block_ot(xc_true, xc_pred, c_coords, sl_c)
         return (loss_h + loss_c) / x.shape[0]
 
     return loss_fn
