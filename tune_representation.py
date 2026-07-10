@@ -37,6 +37,10 @@ from create_nmr_dictionary_features import (
 )
 from benchmark_functional_groups import label_matrix
 
+# Repo root, so default output/data paths are portable (WSL/Linux/mac) instead of
+# hardcoded to one machine's home directory.
+REPO_ROOT = Path(__file__).resolve().parent
+
 
 @dataclass(frozen=True)
 class SweepConfig:
@@ -316,7 +320,9 @@ def build_torch_engine(trial, repr_loss, cfg, h_grid, c_grid, args):
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Tune NMF representation (gap_ev-primary, recon+FG+logP guardrails).")
-    p.add_argument("--raw-data", type=Path, default=Path("/Users/jacknugent/Downloads/alberts_merged_10k.pkl"))
+    p.add_argument("--raw-data", type=Path, default=REPO_ROOT / "Datasets" / "alberts_nmr_qchem_merged.pkl",
+                   help="Labeled pickle with h_nmr_peaks, c_nmr_peaks, gap_ev, smiles. "
+                        "Default is repo-relative; pass your own path (WSL/Linux/mac all fine).")
     p.add_argument("--sample", type=int, default=12000)
     p.add_argument("--val-frac", type=float, default=0.15)
     p.add_argument("--seed", type=int, default=3245)
@@ -357,7 +363,7 @@ def parse_args() -> argparse.Namespace:
     # collide (sklearn keeps the original names for continuity with existing .db files).
     tag = args.probe if args.engine == "sklearn" else f"{args.probe}_torch"
     if args.out is None:
-        args.out = Path(f"/Users/jacknugent/Downloads/alberts_gap_repr_sweep_{tag}.json")
+        args.out = REPO_ROOT / "sweeps" / f"alberts_gap_repr_sweep_{tag}.json"
     if args.study_name is None:
         args.study_name = f"nmf_repr_{tag}"
     return args
