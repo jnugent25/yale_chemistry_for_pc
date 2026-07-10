@@ -314,7 +314,8 @@ def build_torch_engine(trial, repr_loss, cfg, h_grid, c_grid, args):
     )
     tcfg = TorchNMFConfig(loss="geomloss", ot_loss=ot_loss, reach=reach, sinkhorn_p=p,
                           sinkhorn_scaling=scaling, mass_normalize=mass_normalize,
-                          h_blur=h_blur, c_blur=c_blur, **common)
+                          h_blur=h_blur, c_blur=c_blur, sinkhorn_backend=args.torch_sinkhorn_backend,
+                          **common)
     return TorchNMF(tcfg, geometry=geom)
 
 
@@ -344,6 +345,12 @@ def parse_args() -> argparse.Namespace:
                    help="(torch engine) representation loss(es) to search. Give several to let "
                         "the sweep tune which loss maximizes downstream R². Ignored for sklearn.")
     p.add_argument("--torch-device", default=None, help="torch device (default: auto cuda>mps>cpu).")
+    p.add_argument("--torch-sinkhorn-backend", choices=["auto", "tensorized", "online", "multiscale"],
+                   default="auto",
+                   help="geomloss backend for OT losses. 'auto' picks 'online' (pykeops JIT) on "
+                        "CUDA, which needs a full CUDA toolkit (nvcc) on PATH, not just a driver. "
+                        "If pykeops can't find its CUDA libraries, pass 'tensorized' to use pure "
+                        "torch instead (no compiler needed, slightly more memory).")
     p.add_argument("--torch-n-iter", type=int, default=300, help="Adam iterations per torch NMF fit (when not searched).")
     p.add_argument("--torch-lr", type=float, default=0.05, help="Adam learning rate (torch engine, when not searched).")
     p.add_argument("--search-optim", action="store_true",
