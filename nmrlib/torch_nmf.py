@@ -33,12 +33,16 @@ geomloss loss can reconstruct that structure.
 
 STATUS
 ------
-  - geomloss Sinkhorn loss (block-aware OT): IMPLEMENTED + smoke-tested end-to-end on
-    synthetic spectra (geomloss 0.3.1). fit/transform optimize the OT objective, codes
+  - geomloss loss (block-aware OT / MMD): IMPLEMENTED + smoke-tested end-to-end on
+    synthetic spectra (geomloss 0.3.1). fit/transform optimize the objective, codes
     stay finite & non-negative, and the loss correctly grows with peak-shift distance
-    where L2 is blind (near vs far shift: OT ratio ~178, L2 ratio ~1.06). backend
-    auto-selects "online" (keops) on CUDA, "tensorized" (pure torch) on MPS/CPU.
-    Lazy-imported, so this module loads fine without geomloss installed.
+    where L2 is blind (near vs far shift: OT ratio ~178, L2 ratio ~1.06). Supports
+    balanced Sinkhorn (shape-only), UNBALANCED OT via `reach` (also sees total
+    intensity: 2x-mass diff -> 0.88 vs balanced 0.00), and MMD families (`ot_loss`=
+    energy/gaussian/laplacian). normalize_coords rescales each block to [0,1] so the
+    wide C grid (0-220 ppm) doesn't underflow the Sinkhorn kernel (p=2 NaNs without
+    it) or swamp the H block. backend auto-selects "online" (keops) on CUDA,
+    "tensorized" on MPS/CPU. Lazy-imported, so this module loads fine without geomloss.
   - Frobenius / KL losses: IMPLEMENTED but NOT for production — sklearn's coordinate
     descent beats gradient descent on pure beta-divergences (parity check: sklearn
     ~0.010 rel-recon vs Adam ~0.057 on a rank-12 synthetic). Keep sklearn NMF for
@@ -84,12 +88,40 @@ class TorchNMFConfig:
 
     # Objective ------------------------------------------------------------- #
     loss: LossName = "frobenius"
-    # geomloss-only: entropic-regularization scale (in *ppm*, the ground-metric
-    # units). Larger = blurrier / cheaper / more stable; smaller = closer to exact
-    # Wasserstein but harder to optimize. A few grid-steps is a sane starting point.
+
+    # geomloss-only knobs (loss="geomloss") ---------------------------------- #
+    # Which geomloss family (its `loss=` arg):
+    #   "sinkhorn"  entropic OT — the ppm-aware Wasserstein loss (main use case).
+    #   "energy"    Energy-Distance MMD (k=-|x-y|): parameter-free (ignores blur),
+    #               handles unequal mass, much cheaper — a good cross-check.
+    #   "gaussian"/"laplacian"  MMD with blur=sigma. "hausdorff"  ICP-like.
+    ot_loss: Literal["sinkhorn", "energy", "gaussian", "laplacian", "hausdorff"] = "sinkhorn"
+    # Entropic-regularization scale. Units follow normalize_coords: a fraction of each
+    # block's ppm span when True (default), else raw ppm. Larger = blurrier / cheaper /
+    # more stable; smaller = closer to exact Wasserstein but harder to optimize (and
+    # NaN-prone — see normalize_coords). (For gaussian/laplacian it's the kernel sigma.)
     blur: float = 0.05
-    sinkhorn_p: Literal[1, 2] = 2          # ground metric |x-y|^p
-    sinkhorn_scaling: float = 0.7          # geomloss annealing (speed/accuracy trade)
+    sinkhorn_p: Literal[1, 2] = 2          # ground metric |x-y|^p (sinkhorn/hausdorff)
+    # Rescale each block's ppm coords to [0,1] before computing OT. Strongly
+    # recommended: the C grid spans 0-220 ppm, so a raw p=2 cost hits ~2.4e4 and the
+    # Sinkhorn kernel exp(-cost/blur^p) underflows to NaN; it also lets the C block
+    # dominate the H block (0-12) in the summed loss. With this on, blur/reach are
+    # fractions of each block's ppm span and H/C contribute on comparable scales.
+    normalize_coords: bool = True
+    sinkhorn_scaling: float = 0.7          # sinkhorn annealing (speed<0.4 .. accuracy>0.9)
+    debias: bool = True                    # unbiased Sinkhorn *divergence* (=0 iff equal)
+    # UNBALANCED OT: mass-creation/destruction penalty distance (geomloss `reach`=tau,
+    # rho=tau^p), in the same units as `blur` (normalized span if normalize_coords).
+    # None => balanced OT, which requires equal total mass (hence unit-mass
+    # normalization below). Set this to let spectra of *different total intensity*
+    # (peak count / concentration) be compared without discarding that magnitude —
+    # mass farther than `reach` is dropped rather than transported.
+    reach: Optional[float] = None
+    # Normalize each spectrum row to unit mass before the OT/MMD compare.
+    #   None  => auto: True when balanced (reach is None), False when unbalanced.
+    #   True  => always normalize (compare shapes only; magnitude discarded).
+    #   False => compare raw intensities (needs reach set, or an MMD `ot_loss`).
+    mass_normalize: Optional[bool] = None
     # geomloss backend. "auto" -> "online" (keops, no full cost matrix) on CUDA,
     # "tensorized" (pure torch, needs the full NxN matrix) on MPS/CPU where keops
     # isn't available. "online" scales to the large C-grid; "tensorized" does not.
@@ -201,19 +233,40 @@ def _make_geomloss(cfg: TorchNMFConfig) -> ReconstructionLoss:
         # on CUDA, where it avoids the O(N^2) cost matrix for the large C-grid.
         backend = "online" if dev == "cuda" else "tensorized"
 
-    sinkhorn = SamplesLoss(
-        loss="sinkhorn",
+    # reach/scaling/debias are Sinkhorn/Hausdorff knobs; geomloss accepts (and
+    # ignores) them for the MMD families, so we can pass them unconditionally.
+    sample_loss = SamplesLoss(
+        loss=cfg.ot_loss,
         p=cfg.sinkhorn_p,
         blur=cfg.blur,
+        reach=cfg.reach,               # None => balanced OT; set => unbalanced
         scaling=cfg.sinkhorn_scaling,
+        debias=cfg.debias,
         backend=backend,
     )
 
-    def _block_ot(a: Tensor, b: Tensor, coords: Tensor) -> Tensor:
-        """Sinkhorn divergence between two batches of intensity vectors over `coords`.
+    # Auto mass-normalization: on when balanced (equal-mass constraint), off when
+    # unbalanced so raw peak intensities / concentration survive the compare.
+    normalize = cfg.mass_normalize
+    if normalize is None:
+        normalize = cfg.reach is None
+    if not normalize and cfg.reach is None and cfg.ot_loss in ("sinkhorn", "hausdorff"):
+        # Balanced OT on unequal-mass rows is ill-posed; warn rather than silently
+        # produce garbage. MMD families (energy/gaussian/laplacian) are fine unnormalized.
+        import warnings
+        warnings.warn(
+            "geomloss: mass_normalize=False with balanced OT (reach=None, "
+            f"ot_loss={cfg.ot_loss!r}) compares unequal-mass measures. Set reach for "
+            "unbalanced OT, or use an MMD ot_loss (energy/gaussian/laplacian).",
+            stacklevel=2,
+        )
 
-        a, b: (batch, n_bins) >= 0 ; coords: (n_bins, 1). Rows are normalized to unit
-        mass; zero-mass rows are dropped (an all-zero reconstruction has no OT target).
+    def _block_ot(a: Tensor, b: Tensor, coords: Tensor) -> Tensor:
+        """geomloss distance between two batches of intensity vectors over `coords`.
+
+        a, b: (batch, n_bins) >= 0 ; coords: (n_bins, 1). When `normalize`, rows are
+        scaled to unit mass (shape-only compare); otherwise raw intensities are used
+        (unbalanced OT / MMD). Zero-mass rows are dropped (nothing to transport).
         """
         eps = 1e-12
         a_mass = a.sum(dim=1, keepdim=True)
@@ -221,19 +274,29 @@ def _make_geomloss(cfg: TorchNMFConfig) -> ReconstructionLoss:
         keep = (a_mass.squeeze(1) > eps) & (b_mass.squeeze(1) > eps)
         if keep.sum() == 0:
             return a.sum() * 0.0  # differentiable zero
-        a_n = (a[keep] / a_mass[keep].clamp_min(eps))
-        b_n = (b[keep] / b_mass[keep].clamp_min(eps))
+        a_k, b_k = a[keep], b[keep]
+        if normalize:
+            a_k = a_k / a_mass[keep].clamp_min(eps)
+            b_k = b_k / b_mass[keep].clamp_min(eps)
         # geomloss batched weighted point clouds: weights (B,N), locations (B,N,D).
-        xy = coords.unsqueeze(0).expand(a_n.shape[0], -1, -1).contiguous()
-        return sinkhorn(a_n, xy, b_n, xy).sum()
+        xy = coords.unsqueeze(0).expand(a_k.shape[0], -1, -1).contiguous()
+        return sample_loss(a_k, xy, b_k, xy).sum()
 
     def loss_fn(x: Tensor, x_hat: Tensor, geometry: Optional[SpectralGeometry]) -> Tensor:
         if geometry is None:
             raise ValueError("geomloss reconstruction requires a SpectralGeometry (grid coords).")
         hw = geometry.h_width
         dev, dt = x.device, x.dtype
-        h_coords = torch.as_tensor(geometry.h_coords, device=dev, dtype=dt).unsqueeze(1)
-        c_coords = torch.as_tensor(geometry.c_coords, device=dev, dtype=dt).unsqueeze(1)
+
+        def _coords(arr: np.ndarray) -> Tensor:
+            t = torch.as_tensor(arr, device=dev, dtype=dt)
+            if cfg.normalize_coords:
+                span = (t.max() - t.min()).clamp_min(1e-12)
+                t = (t - t.min()) / span
+            return t.unsqueeze(1)
+
+        h_coords = _coords(geometry.h_coords)
+        c_coords = _coords(geometry.c_coords)
         # Undo the modality weights so each block is compared in its own intensity scale.
         xh_true = x[:, :hw] / geometry.h_modality_weight
         xc_true = x[:, hw:] / geometry.c_modality_weight
@@ -356,6 +419,12 @@ class TorchNMF:
         for step in range(n_iter):
             loss = opt.step(closure)
             cur = float(loss.detach())
+            if not np.isfinite(cur):
+                raise FloatingPointError(
+                    f"Non-finite loss ({cur}) at step {step}. For geomloss this is usually "
+                    "Sinkhorn underflow: keep normalize_coords=True, use sinkhorn_p=1 or a "
+                    "larger blur, and prefer dtype='float64' for the OT path."
+                )
             self.n_iter_ = step + 1
             if cfg.verbose and step % max(1, n_iter // 10) == 0:
                 print(f"  [torch-nmf] step {step:4d}  loss={cur:.6e}", flush=True)
