@@ -427,7 +427,16 @@ class TorchNMF:
             return loss
 
         for step in range(n_iter):
-            loss = opt.step(closure)
+            try:
+                loss = opt.step(closure)
+            except (RuntimeError, IndexError) as exc:
+                # LBFGS's strong-Wolfe line search raises IndexError/RuntimeError when
+                # the direction is degenerate (non-smooth OT loss, zero/NaN gradient).
+                # Treat as a failed fit so callers can prune, not crash.
+                raise FloatingPointError(
+                    f"optimizer step failed at step {step} ({type(exc).__name__}: {exc}); "
+                    "often an LBFGS line-search failure on a non-smooth loss — try optimizer='adam'."
+                ) from exc
             cur = float(loss.detach())
             if not np.isfinite(cur):
                 raise FloatingPointError(

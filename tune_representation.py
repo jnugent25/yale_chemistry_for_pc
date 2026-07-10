@@ -265,10 +265,21 @@ def build_torch_engine(trial, repr_loss, cfg, h_grid, c_grid, args):
     knobs. Imported lazily so sklearn runs never pull in torch."""
     from nmrlib.torch_nmf import TorchNMF, TorchNMFConfig, SpectralGeometry
 
+    # Optimizer / iteration budget: fixed from CLI unless --search-optim, in which
+    # case they join the search. lr range is conditioned on the optimizer (LBFGS
+    # wants a much larger step than Adam).
+    if args.search_optim:
+        optimizer = trial.suggest_categorical("optimizer", ["adam", "lbfgs"])
+        lr = (trial.suggest_float("lr", 0.1, 1.0, log=True) if optimizer == "lbfgs"
+              else trial.suggest_float("lr", 1e-3, 0.2, log=True))
+        n_iter = trial.suggest_int("n_iter", 100, 600, step=50)
+    else:
+        optimizer, lr, n_iter = "adam", args.torch_lr, args.torch_n_iter
+
     common = dict(
         n_components=cfg.n_components, alpha_W=cfg.alpha_W, alpha_H=cfg.alpha_H,
-        l1_ratio=cfg.l1_ratio, optimizer="adam", lr=args.torch_lr,
-        n_iter=args.torch_n_iter, transform_n_iter=args.torch_n_iter,
+        l1_ratio=cfg.l1_ratio, optimizer=optimizer, lr=lr,
+        n_iter=n_iter, transform_n_iter=n_iter,
         device=args.torch_device, dtype="float32",
     )
     if repr_loss in ("frobenius", "kl"):
@@ -279,16 +290,25 @@ def build_torch_engine(trial, repr_loss, cfg, h_grid, c_grid, args):
     ot_loss = "sinkhorn" if repr_loss.startswith("sinkhorn") else repr_loss
     reach = trial.suggest_float("reach", 0.05, 0.5, log=True) if repr_loss == "sinkhorn_unbalanced" else None
     p = trial.suggest_categorical("sinkhorn_p", [1, 2]) if ot_loss == "sinkhorn" else 2
+    # Sinkhorn annealing ratio (accuracy/speed); only sinkhorn uses it.
+    scaling = trial.suggest_float("sinkhorn_scaling", 0.5, 0.9) if ot_loss == "sinkhorn" else 0.7
     h_blur = c_blur = None
     if ot_loss in ("sinkhorn", "gaussian", "laplacian"):
         # Normalized-span units: H peaks are much narrower than C, so search them apart.
         h_blur = trial.suggest_float("h_blur", 0.005, 0.1, log=True)
         c_blur = trial.suggest_float("c_blur", 0.02, 0.3, log=True)
+    # Shape-only (unit mass) vs keep-magnitude — only searchable where both are valid:
+    # unbalanced OT or an MMD loss. Balanced sinkhorn stays auto (=normalized), since
+    # balanced OT on unequal-mass rows is ill-posed.
+    mass_normalize = None
+    if repr_loss == "sinkhorn_unbalanced" or ot_loss in ("energy", "gaussian", "laplacian"):
+        mass_normalize = trial.suggest_categorical("mass_normalize", [True, False])
     geom = SpectralGeometry(
         h_coords=h_grid, c_coords=c_grid,
         h_modality_weight=cfg.h_modality_weight, c_modality_weight=cfg.c_modality_weight,
     )
     tcfg = TorchNMFConfig(loss="geomloss", ot_loss=ot_loss, reach=reach, sinkhorn_p=p,
+                          sinkhorn_scaling=scaling, mass_normalize=mass_normalize,
                           h_blur=h_blur, c_blur=c_blur, **common)
     return TorchNMF(tcfg, geometry=geom)
 
@@ -317,8 +337,11 @@ def parse_args() -> argparse.Namespace:
                    help="(torch engine) representation loss(es) to search. Give several to let "
                         "the sweep tune which loss maximizes downstream R². Ignored for sklearn.")
     p.add_argument("--torch-device", default=None, help="torch device (default: auto cuda>mps>cpu).")
-    p.add_argument("--torch-n-iter", type=int, default=300, help="Adam iterations per torch NMF fit.")
-    p.add_argument("--torch-lr", type=float, default=0.05, help="Adam learning rate (torch engine).")
+    p.add_argument("--torch-n-iter", type=int, default=300, help="Adam iterations per torch NMF fit (when not searched).")
+    p.add_argument("--torch-lr", type=float, default=0.05, help="Adam learning rate (torch engine, when not searched).")
+    p.add_argument("--search-optim", action="store_true",
+                   help="(torch engine) also tune the optimizer (adam/lbfgs), learning rate, "
+                        "and iteration count per trial instead of fixing them from --torch-lr/--torch-n-iter.")
     # Defaults for these are derived from --probe (below) so elasticnet and rf runs
     # never share a study file / name — keeps the two searches fully separate.
     p.add_argument("--out", type=Path, default=None,
