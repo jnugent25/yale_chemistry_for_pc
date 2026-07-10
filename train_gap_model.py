@@ -63,12 +63,14 @@ def config_from_params(params: dict) -> SweepConfig:
         c_sigma_ppm=params["c_sigma_ppm"],
         h_width_scale=params["h_width_scale"],
         c_width_scale=params["c_width_scale"],
-        h_multiplicity=params["h_multiplicity"],
+        # h_multiplicity is omitted by the sweep for OT trials, and solver is now
+        # pinned (no longer suggested), so both may be absent from a trial's params.
+        h_multiplicity=params.get("h_multiplicity", False),
         use_peak_width=params["use_peak_width"],
         intensity_transform=params["intensity_transform"],
         h_modality_weight=params["h_modality_weight"],
         c_modality_weight=1.0,
-        solver=params["solver"],
+        solver=params.get("solver", "cd"),
         beta_loss=params.get("beta_loss", "frobenius"),
         alpha_W=params["alpha_W"],
         alpha_H=params["alpha_H"],
