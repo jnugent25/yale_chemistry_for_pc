@@ -731,6 +731,21 @@ wheels = [
 ]
 
 [[package]]
+name = "geomloss"
+version = "0.3.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy", version = "2.3.5", source = { registry = "https://pypi.org/simple" }, marker = "platform_machine == 'x86_64' and sys_platform == 'darwin'" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "platform_machine != 'x86_64' or sys_platform != 'darwin'" },
+    { name = "scipy" },
+    { name = "torch" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/be/a8/c7635702d96693895bc4831ad909423b57ec93183a2d92d9066369eb7cbf/geomloss-0.3.1.tar.gz", hash = "sha256:8d8bee2a57c9393642866c329e0dd069f6270b06a721683b0f164cadc4902505", size = 67281, upload-time = "2026-05-05T11:40:08.047Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e8/7e/37f7b8b7d78ca5b62062c804264914696faf12850040930f12c5e75fb094/geomloss-0.3.1-py3-none-any.whl", hash = "sha256:3ecb9ed72a7122d1ff60f0975edd759d2d1ac1b2397eaea7af6c7523ee117d4b", size = 82962, upload-time = "2026-05-05T11:40:06.525Z" },
+]
+
+[[package]]
 name = "greenlet"
 version = "3.5.3"
 source = { registry = "https://pypi.org/simple" }
@@ -1255,6 +1270,12 @@ sdist = { url = "https://files.pythonhosted.org/packages/26/2d/ef58fed122b268c69
 wheels = [
     { url = "https://files.pythonhosted.org/packages/ab/b5/36c712098e6191d1b4e349304ef73a8d06aed77e56ceaac8c0a306c7bda1/jupyterlab_widgets-3.0.16-py3-none-any.whl", hash = "sha256:45fa36d9c6422cf2559198e4db481aa243c7a32d9926b500781c830c80f7ecf8", size = 914926, upload-time = "2025-11-01T21:11:28.008Z" },
 ]
+
+[[package]]
+name = "keopscore"
+version = "2.3"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/91/28/94f516c55fca15be37cc75d56f9560d3be5a4badc87ca78202e06dd2d526/keopscore-2.3.tar.gz", hash = "sha256:e8a700c22efee59a7723ed7516c2d88ab143a11290dd23b07eb7bba1c9d16fef", size = 118471, upload-time = "2025-04-17T12:07:37.539Z" }
 
 [[package]]
 name = "kiwisolver"
@@ -2352,6 +2373,15 @@ wheels = [
 ]
 
 [[package]]
+name = "pybind11"
+version = "3.0.4"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/cc/f0/35145a3c3baffeef55d4b8324caa33abaa8fa56ab345ecd4b2211d09163e/pybind11-3.0.4.tar.gz", hash = "sha256:3286b59c8a774b9ee650169302dd5a4eedc30a8617905a0560dd8ee44775130c", size = 589533, upload-time = "2026-04-19T03:08:15.925Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b3/06/c3a23c9a0263b136c519f033a58d4641e73065fefc7754e9667ec206d992/pybind11-3.0.4-py3-none-any.whl", hash = "sha256:961720ee652da51d531b7b2451a6bd2bc042b0106e6d9baa48ecb7d58034ce63", size = 314166, upload-time = "2026-04-19T03:08:14.091Z" },
+]
+
+[[package]]
 name = "pycparser"
 version = "3.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2480,6 +2510,18 @@ wheels = [
 crypto = [
     { name = "cryptography" },
 ]
+
+[[package]]
+name = "pykeops"
+version = "2.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "keopscore" },
+    { name = "numpy", version = "2.3.5", source = { registry = "https://pypi.org/simple" }, marker = "platform_machine == 'x86_64' and sys_platform == 'darwin'" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "platform_machine != 'x86_64' or sys_platform != 'darwin'" },
+    { name = "pybind11" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/3b/e1/3bb0af9916632e712cc0b0326679647d7452e626811dbc2b15b277add460/pykeops-2.3.tar.gz", hash = "sha256:458fa77985efd2161be9c719e8dd41e495526cd735d3262aec09902505f5bdba", size = 552155, upload-time = "2025-04-17T12:07:25.927Z" }
 
 [[package]]
 name = "pyparsing"
@@ -3453,8 +3495,15 @@ dependencies = [
     { name = "torch" },
 ]
 
+[package.optional-dependencies]
+geomloss = [
+    { name = "geomloss" },
+    { name = "pykeops" },
+]
+
 [package.metadata]
 requires-dist = [
+    { name = "geomloss", marker = "extra == 'geomloss'", specifier = ">=0.2.6" },
     { name = "jupyter", specifier = ">=1.1.1" },
     { name = "molplotly", specifier = ">=1.1.5" },
     { name = "optuna", specifier = ">=4.9.0" },
@@ -3463,6 +3512,7 @@ requires-dist = [
     { name = "plotly", specifier = ">=6.8.0" },
     { name = "plotnine", specifier = ">=0.15.5" },
     { name = "pyarrow", specifier = ">=24.0.0" },
+    { name = "pykeops", marker = "extra == 'geomloss'", specifier = ">=2.2" },
     { name = "rdkit", specifier = ">=2026.3.2" },
     { name = "scikit-learn", specifier = ">=1.9.0" },
     { name = "seaborn", specifier = ">=0.13.2" },
@@ -3470,6 +3520,7 @@ requires-dist = [
     { name = "skimpy", specifier = ">=0.0.20" },
     { name = "torch", specifier = ">=2.12.1" },
 ]
+provides-extras = ["geomloss"]
 
 [[package]]
 name = "zipp"

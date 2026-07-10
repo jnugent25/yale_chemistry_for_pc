@@ -20,3 +20,12 @@ dependencies = [
     "skimpy>=0.0.20",
     "torch>=2.12.1",
 ]
+
+[project.optional-dependencies]
+# Optimal-transport reconstruction loss for the PyTorch NMF engine
+# (nmrlib.torch_nmf, loss="geomloss"). pykeops JIT-compiles kernels; on Apple
+# Silicon it runs on CPU. Install with: uv sync --extra geomloss
+geomloss = [
+    "geomloss>=0.2.6",
+    "pykeops>=2.2",
+]
