@@ -373,6 +373,13 @@ def main() -> None:
     args = parse_args()
     args.out.parent.mkdir(parents=True, exist_ok=True)
 
+    if not args.raw_data.exists():
+        raise SystemExit(
+            f"--raw-data not found: {args.raw_data}\n"
+            f"  (resolved from cwd: {Path.cwd()})\n"
+            "Pass an existing pickle, e.g. --raw-data /mnt/c/Users/<you>/Desktop/alberts.pkl\n"
+            "Check the exact path from WSL with:  ls -la <path>"
+        )
     print(f"Loading {args.raw_data} ...")
     df = pd.read_pickle(args.raw_data)
     # Normalize column aliases (e.g. the alberts qchem-merged dataset).
