@@ -224,6 +224,7 @@ def _trial_row(t: optuna.trial.FrozenTrial) -> dict:
     in-memory state, so the dump is correct even after a resume."""
     return {
         "name": f"trial_{t.number}",
+        "repr_loss": t.user_attrs.get("repr_loss", "frobenius"),
         "n_components": t.params.get("n_components"),
         "h_sigma": t.params.get("h_sigma_ppm"),
         "c_sigma": t.params.get("c_sigma_ppm"),
@@ -635,10 +636,11 @@ def main() -> None:
     # trials not dominated on both gap_ev R² and logP R²).
     pareto = sorted(study.best_trials, key=lambda t: t.values[0], reverse=True)
     print(f"\nPareto front ({len(pareto)} non-dominated trials), by gap_ev R²:")
-    print(f"{'trial':<10}{'gap R²↑':>10}{'logP R²↑':>10}")
-    print("-" * 30)
+    print(f"{'trial':<10}{'loss':<20}{'gap R²↑':>10}{'logP R²↑':>10}")
+    print("-" * 50)
     for t in pareto:
-        print(f"{'trial_'+str(t.number):<10}{t.values[0]:>10.4f}{t.values[1]:>10.4f}")
+        loss = t.user_attrs.get("repr_loss", "frobenius")
+        print(f"{'trial_'+str(t.number):<10}{loss:<20}{t.values[0]:>10.4f}{t.values[1]:>10.4f}")
     print("\nPareto-front params:")
     for t in pareto:
         print(f"  trial_{t.number} (gap R²={t.values[0]:.4f}, logP R²={t.values[1]:.4f}):")
@@ -646,11 +648,11 @@ def main() -> None:
             print(f"      {k}: {v}")
 
     print("\nAll Trials (by trial number):")
-    print(f"{'trial':<10}{'nc':>5}{'hσ':>7}{'cσ':>7}{'recon↓':>10}{'FG micro↑':>11}{'FG macro↑':>11}{'logP R²↑':>10}{'gap R²↑':>10}")
-    print("-" * 87)
+    print(f"{'trial':<10}{'loss':<20}{'nc':>5}{'hσ':>7}{'cσ':>7}{'recon↓':>10}{'FG micro↑':>11}{'FG macro↑':>11}{'logP R²↑':>10}{'gap R²↑':>10}")
+    print("-" * 107)
     for r in sorted((_trial_row(t) for t in completed), key=lambda r: int(r["name"].split("_")[1])):
         print(
-            f"{r['name']:<10}{r['n_components']:>5}{r['h_sigma']:>7.2f}{r['c_sigma']:>7.2f}"
+            f"{r['name']:<10}{r['repr_loss']:<20}{r['n_components']:>5}{r['h_sigma']:>7.2f}{r['c_sigma']:>7.2f}"
             f"{r['val_rel_recon_err']:>10.4f}{r['fg_micro_f1']:>11.4f}{r['fg_macro_f1']:>11.4f}{r['logp_r2']:>10.4f}{r['gap_ev_r2']:>10.4f}"
         )
     print(f"\nWrote: {args.out}")
