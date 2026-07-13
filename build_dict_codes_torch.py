@@ -67,7 +67,49 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--prefix", type=str, default="nmr_dict_code_")
     p.add_argument("--out", type=Path, default=None,
                    help="Output pickle. Default: Datasets/<target>_torch_nmf_codes.pkl")
+    p.add_argument("--save-dictionary", action=argparse.BooleanOptionalAction, default=True,
+                   help="Also save the learned dictionary artifact (h/c component atoms + "
+                        "grids + config) so the NMF visualizers (plot_nmf_components, "
+                        "plot_nmf_reconstruction, interpret_nmr_motifs) can plot the OT atoms. "
+                        "On by default; pass --no-save-dictionary to skip.")
+    p.add_argument("--dict-out", type=Path, default=None,
+                   help="Dictionary artifact path. Default: alongside --out as "
+                        "<target>_torch_nmf_dictionary.pkl")
     return p.parse_args()
+
+
+def save_dictionary(path: Path, engine, params: dict, cfg: SweepConfig,
+                    h_grid: np.ndarray, c_grid: np.ndarray, h_width: int,
+                    code_cols: list[str], repr_loss: str) -> None:
+    """Dump a dictionary bundle in the same format the sklearn pipeline uses
+    (nmf_dictionary_*.pkl), so the existing NMF visualizers work on the OT atoms.
+
+    Splits the learned dictionary ``engine.components_`` back into per-block H/C
+    atoms in physical intensity scale (undoing the modality weights), matching how
+    build_dict_codes.py / create_nmr_dictionary_features.py store their bundles.
+    """
+    from dataclasses import asdict
+
+    comps = engine.components_
+    h_comps = comps[:, :h_width] / cfg.h_modality_weight
+    c_comps = comps[:, h_width:] / cfg.c_modality_weight
+    # config: SweepConfig fields the visualizers read (h_sigma_ppm, width scales,
+    # use_peak_width, intensity_transform) plus the raw OT params for provenance.
+    config = {**asdict(cfg), **params, "repr_loss": repr_loss}
+    bundle = {
+        "config": config,
+        "engine": "torch_nmf",
+        "repr_loss": repr_loss,
+        "h_components": h_comps,
+        "c_components": c_comps,
+        "h_grid_ppm": h_grid,
+        "c_grid_ppm": c_grid,
+        "feature_columns": code_cols,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pd.to_pickle(bundle, path)
+    print(f"Wrote dictionary artifact ({h_comps.shape[0]} atoms, "
+          f"H{h_comps.shape} C{c_comps.shape}) to:\n  {path}")
 
 
 def build_engine(params: dict, cfg: SweepConfig, h_grid: np.ndarray, c_grid: np.ndarray,
@@ -203,6 +245,16 @@ def main() -> None:
     out_df.to_pickle(out)
     print(f"\nWrote {len(out_df)} rows x {out_df.shape[1]} cols "
           f"({len(code_cols)} codes + 3 recon-error cols) to:\n  {out}")
+
+    if args.save_dictionary:
+        dict_out = args.dict_out
+        if dict_out is None:
+            stem = out.stem
+            dict_stem = (stem.replace("_codes", "_dictionary")
+                         if "_codes" in stem else stem + "_dictionary")
+            dict_out = out.with_name(dict_stem + ".pkl")
+        save_dictionary(dict_out, engine, params, cfg, h_grid, c_grid,
+                        h_width, code_cols, repr_loss)
 
 
 if __name__ == "__main__":
