@@ -71,7 +71,7 @@ except ImportError as exc:  # pragma: no cover
 # --------------------------------------------------------------------------- #
 # Configuration
 # --------------------------------------------------------------------------- #
-LossName = Literal["frobenius", "kl", "geomloss"]
+LossName = Literal["frobenius", "kl", "geomloss", "w1_grid"]
 Optimizer = Literal["adam", "lbfgs"]
 Nonneg = Literal["softplus", "clamp"]
 
@@ -319,10 +319,84 @@ def _make_geomloss(cfg: TorchNMFConfig) -> ReconstructionLoss:
     return loss_fn
 
 
+def _make_w1_grid(cfg: TorchNMFConfig) -> ReconstructionLoss:
+    """Exact 1-D Wasserstein-1 per block via CDF differences on the fixed ppm grid.
+
+    Because each block lives on a single sorted ppm axis, balanced OT has a closed form:
+    unit-normalize both spectra to probability measures on the grid, then
+    ``W1 = sum_i |CDF_a(t_i) - CDF_b(t_i)| * (t_{i+1} - t_i)``. That's a cumsum, a
+    subtract and a weighted abs-sum — O(n) per row, exact (no entropic blur, no Sinkhorn
+    iteration, no keops/nvcc), and fully differentiable. Drop-in balanced-OT alternative
+    to loss='geomloss' when you don't need unbalanced (``reach``) mass handling.
+
+    Follows the geomloss path's conventions: rows unit-normalized (balanced), coords
+    optionally rescaled per block to [0,1] (``normalize_coords``) so H and C contribute
+    on comparable scales, modality weights undone before comparing, zero-mass rows
+    dropped. Only p=1 is closed-form-cheap here; ``sinkhorn_p=2`` would need quantile
+    inversion and is not wired, so it is ignored with a warning.
+    """
+    if cfg.sinkhorn_p != 1:
+        import warnings
+        warnings.warn(
+            "w1_grid computes Wasserstein-1 (cumsum closed form); "
+            f"sinkhorn_p={cfg.sinkhorn_p} is ignored (p=2 would need quantile inversion).",
+            stacklevel=2,
+        )
+    # Balanced W1 needs equal total mass; default to unit-normalizing rows.
+    normalize = True if cfg.mass_normalize is None else cfg.mass_normalize
+
+    def _block_w1(a: Tensor, b: Tensor, edges: Tensor) -> Tensor:
+        """W1 between two batches of intensity vectors on a sorted grid.
+
+        a, b: (batch, n_bins) >= 0 ; edges: (n_bins-1,) gaps t_{i+1}-t_i. Rows are
+        unit-normalized (when ``normalize``); zero-mass rows are dropped.
+        """
+        eps = 1e-12
+        a_mass = a.sum(dim=1, keepdim=True)
+        b_mass = b.sum(dim=1, keepdim=True)
+        keep = (a_mass.squeeze(1) > eps) & (b_mass.squeeze(1) > eps)
+        if keep.sum() == 0:
+            return a.sum() * 0.0  # differentiable zero
+        a_k, b_k = a[keep], b[keep]
+        if normalize:
+            a_k = a_k / a_mass[keep].clamp_min(eps)
+            b_k = b_k / b_mass[keep].clamp_min(eps)
+        # CDF at grid points 0..n-2 (the last equals total mass for both -> contributes 0).
+        cdf_diff = (a_k.cumsum(dim=1) - b_k.cumsum(dim=1))[:, :-1]
+        return (cdf_diff.abs() * edges).sum()
+
+    def loss_fn(x: Tensor, x_hat: Tensor, geometry: Optional[SpectralGeometry]) -> Tensor:
+        if geometry is None:
+            raise ValueError("w1_grid reconstruction requires a SpectralGeometry (grid coords).")
+        hw = geometry.h_width
+        dev, dt = x.device, x.dtype
+
+        def _edges(arr: np.ndarray) -> Tensor:
+            t = torch.as_tensor(arr, device=dev, dtype=dt)
+            if cfg.normalize_coords:
+                span = (t.max() - t.min()).clamp_min(1e-12)
+                t = (t - t.min()) / span
+            return t.diff().clamp_min(0)  # grid is sorted ascending
+
+        h_edges = _edges(geometry.h_coords)
+        c_edges = _edges(geometry.c_coords)
+        # Undo modality weights so each block is compared in its own intensity scale.
+        xh_true = x[:, :hw] / geometry.h_modality_weight
+        xc_true = x[:, hw:] / geometry.c_modality_weight
+        xh_pred = x_hat[:, :hw] / geometry.h_modality_weight
+        xc_pred = x_hat[:, hw:] / geometry.c_modality_weight
+        loss_h = _block_w1(xh_true, xh_pred, h_edges)
+        loss_c = _block_w1(xc_true, xc_pred, c_edges)
+        return (loss_h + loss_c) / x.shape[0]
+
+    return loss_fn
+
+
 LOSS_REGISTRY: dict[str, Callable[[TorchNMFConfig], ReconstructionLoss]] = {
     "frobenius": lambda cfg: _frobenius,
     "kl": lambda cfg: _kl,
     "geomloss": _make_geomloss,
+    "w1_grid": _make_w1_grid,
 }
 
 

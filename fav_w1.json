@@ -1,0 +1,17 @@
+{
+    "repr_loss": "w1_grid",
+    "n_components": 35,
+    "h_sigma_ppm": 0.08,
+    "c_sigma_ppm": 1.5,
+    "h_width_scale": 0.8,
+    "c_width_scale": 1.0,
+    "use_peak_width": true,
+    "intensity_transform": "none",
+    "h_modality_weight": 1.0891993688526733,
+    "alpha_W": 0.00013304334324724425,
+    "alpha_H": 0.00015720866579383775,
+    "l1_ratio": 0.46591319008284293,
+    "sinkhorn_p": 1,
+    "normalize_coords": true,
+    "mass_normalize": true
+}

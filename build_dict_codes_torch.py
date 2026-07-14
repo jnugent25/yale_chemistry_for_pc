@@ -129,9 +129,25 @@ def build_engine(params: dict, cfg: SweepConfig, h_grid: np.ndarray, c_grid: np.
     if repr_loss in ("frobenius", "kl"):
         return TorchNMF(TorchNMFConfig(loss=repr_loss, **common), geometry=None), repr_loss
 
+    if repr_loss == "w1_grid":
+        # Exact balanced 1-D Wasserstein-1 per block (cumsum closed form): no Sinkhorn,
+        # no keops/nvcc. Balanced only -> mass_normalize defaults True. Needs geometry.
+        tcfg = TorchNMFConfig(
+            loss="w1_grid",
+            sinkhorn_p=params.get("sinkhorn_p", 1),
+            mass_normalize=params.get("mass_normalize", None),
+            normalize_coords=params.get("normalize_coords", True),
+            **common,
+        )
+        geom = SpectralGeometry(
+            h_coords=h_grid, c_coords=c_grid,
+            h_modality_weight=cfg.h_modality_weight, c_modality_weight=cfg.c_modality_weight,
+        )
+        return TorchNMF(tcfg, geometry=geom), repr_loss
+
     if repr_loss not in OT_FAMILIES:
         raise SystemExit(f"Unknown repr_loss {repr_loss!r}; expected one of "
-                         f"{{frobenius, kl}} | {sorted(OT_FAMILIES)}.")
+                         f"{{frobenius, kl, w1_grid}} | {sorted(OT_FAMILIES)}.")
 
     ot_loss = "sinkhorn" if repr_loss.startswith("sinkhorn") else repr_loss
     # reach => unbalanced OT (only meaningful for sinkhorn_unbalanced).
