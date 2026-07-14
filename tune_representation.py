@@ -290,6 +290,18 @@ def build_torch_engine(trial, repr_loss, cfg, h_grid, c_grid, args):
     if repr_loss in ("frobenius", "kl"):
         return TorchNMF(TorchNMFConfig(loss=repr_loss, **common), geometry=None)
 
+    if repr_loss == "w1_grid":
+        # Exact balanced 1-D Wasserstein-1 per block (cumsum closed form): block-aware
+        # like OT, but no Sinkhorn/keops — hundreds-to-thousands x cheaper per trial.
+        # Balanced only (mass_normalize=True), p=1. No blur/reach/scaling to search.
+        geom = SpectralGeometry(
+            h_coords=h_grid, c_coords=c_grid,
+            h_modality_weight=cfg.h_modality_weight, c_modality_weight=cfg.c_modality_weight,
+        )
+        tcfg = TorchNMFConfig(loss="w1_grid", sinkhorn_p=1, mass_normalize=True,
+                              normalize_coords=True, **common)
+        return TorchNMF(tcfg, geometry=geom)
+
     # geomloss OT / MMD family. h_multiplicity is off for these (see objective), so
     # the H block is single-channel and its width == len(h_grid).
     ot_loss = "sinkhorn" if repr_loss.startswith("sinkhorn") else repr_loss
@@ -341,7 +353,7 @@ def parse_args() -> argparse.Namespace:
                         "torch = Adam gradient descent on GPU; enables the geomloss OT losses "
                         "and is much faster on large data.")
     p.add_argument("--losses", nargs="+", default=["frobenius"],
-                   choices=["frobenius", "kl", "sinkhorn", "sinkhorn_unbalanced", "energy", "gaussian", "laplacian"],
+                   choices=["frobenius", "kl", "w1_grid", "sinkhorn", "sinkhorn_unbalanced", "energy", "gaussian", "laplacian"],
                    help="(torch engine) representation loss(es) to search. Give several to let "
                         "the sweep tune which loss maximizes downstream R². Ignored for sklearn.")
     p.add_argument("--torch-device", default=None, help="torch device (default: auto cuda>mps>cpu).")
@@ -455,7 +467,9 @@ def main() -> None:
         # Representation loss / engine. sklearn -> CD frobenius (no mu); torch -> Adam
         # on GPU for any loss, including the geomloss OT families.
         repr_loss = _suggest_repr_loss(trial, args)
-        is_ot = repr_loss in OT_FAMILIES
+        # Block/distributional losses (OT families + fixed-grid W1) treat each block as
+        # a distribution over its ppm grid, so the multichannel H layout is disabled.
+        is_ot = repr_loss in OT_FAMILIES or repr_loss == "w1_grid"
         # Integer (not categorical) so TPE sees the ordering; recon improves with
         # more atoms but downstream regression overfits past a point.
         nc = trial.suggest_int("n_components", 10, 120, step=5)
