@@ -35,13 +35,31 @@ NMF_ERROR_COLS = [
     "nmr_total_reconstruction_error",
 ]
 
-NMR_STATS_COLS = [
-    "num_delta_13C", "num_delta_1H",
-    "max_delta_13C", "max_delta_1H",
-    "mean_delta_13C",
-    "skew_delta_13C", "skew_delta_1H",
-    "kurt_delta_13C",
+# Comprehensive, symmetric peak-list summary statistics. Built programmatically
+# so the 1H/13C blocks stay in lockstep. The original 8 columns (num/max/mean/
+# skew/kurt _delta_ 13C/1H) remain a subset of this list, so older references and
+# featurized frames keep resolving.
+_STAT_NAMES = ["num", "min", "max", "range", "mean", "median", "std", "skew", "kurt"]
+_DIST_STATS_COLS = [f"{s}_delta_{nuc}" for nuc in ("13C", "1H") for s in _STAT_NAMES]
+
+# Chemical-shift regions (ppm) as fractions of each nucleus's peaks — cheap proxies
+# for aromaticity / heteroatom substitution / carbonyl content (drives gap_ev).
+H_SHIFT_REGIONS = {"aliph_0_3": (0.0, 3.0), "oxy_3_5": (3.0, 5.0),
+                   "arom_6_85": (6.0, 8.5), "down_85_12": (8.5, 12.0)}
+C_SHIFT_REGIONS = {"aliph_0_50": (0.0, 50.0), "oxy_50_100": (50.0, 100.0),
+                   "arom_100_150": (100.0, 150.0), "carbonyl_150_210": (150.0, 210.0)}
+_REGION_COLS = ([f"h_frac_{k}" for k in H_SHIFT_REGIONS]
+                + [f"c_frac_{k}" for k in C_SHIFT_REGIONS])
+
+# Integration / mass (what a balanced-W1 shape-only NMF discards), intensity-weighted
+# shift centroids, peak crowding, cross-nucleus ratio, and mean 13C linewidth.
+_EXTRA_COLS = [
+    "total_nH_1H", "total_integral_13C", "total_intensity_13C",
+    "wmean_delta_1H", "wmean_delta_13C",
+    "density_1H", "density_13C", "c_to_h_peak_ratio", "mean_width_13C",
 ]
+
+NMR_STATS_COLS = _DIST_STATS_COLS + _REGION_COLS + _EXTRA_COLS
 
 
 def c_bin_cols(bin_width: int) -> list[str]:
@@ -94,28 +112,65 @@ def feature_sets(df: pd.DataFrame, warn_missing: bool = True) -> dict[str, list[
     return available
 
 
-def _safe_stat(peaks, key: str, func):
-    vals = [p[key] for p in peaks] if peaks is not None and len(peaks) > 0 else []
-    if len(vals) == 0:
-        return np.nan
-    return func(vals)
+def _dist_stats(vals) -> list[float]:
+    """[num, min, max, range, mean, median, std, skew, kurt] over a shift list.
+
+    Higher moments need enough points to be defined (skew>=3, kurt>=4); below that
+    they are NaN (HGB/trees handle NaN natively). Order matches ``_STAT_NAMES``.
+    """
+    v = np.asarray(vals, dtype=float)
+    if v.size == 0:
+        return [0.0] + [np.nan] * 8
+    return [
+        float(v.size), v.min(), v.max(), v.max() - v.min(), v.mean(), float(np.median(v)),
+        v.std() if v.size >= 2 else 0.0,
+        skew(v) if v.size >= 3 else np.nan,
+        kurtosis(v) if v.size >= 4 else np.nan,
+    ]
+
+
+def _region_fracs(deltas, regions: dict) -> list[float]:
+    """Fraction of peaks whose shift falls in each [lo, hi) region."""
+    d = np.asarray(deltas, dtype=float)
+    n = d.size
+    if n == 0:
+        return [np.nan] * len(regions)
+    return [float(((d >= lo) & (d < hi)).sum()) / n for lo, hi in regions.values()]
 
 
 def add_nmr_stats(df: pd.DataFrame) -> pd.DataFrame:
-    """Summary statistics of the raw peak lists (Mueller-style descriptors)."""
-    out = pd.DataFrame(index=df.index)
-    out["num_delta_13C"] = df["c_nmr_peaks"].apply(len)
-    out["num_delta_1H"] = df["h_nmr_peaks"].apply(len)
-    out["max_delta_13C"] = df["c_nmr_peaks"].apply(lambda p: _safe_stat(p, "delta (ppm)", np.max))
-    out["max_delta_1H"] = df["h_nmr_peaks"].apply(lambda p: _safe_stat(p, "delta", np.max))
-    out["mean_delta_13C"] = df["c_nmr_peaks"].apply(lambda p: _safe_stat(p, "delta (ppm)", np.mean))
-    out["skew_delta_13C"] = df["c_nmr_peaks"].apply(
-        lambda p: _safe_stat(p, "delta (ppm)", lambda v: skew(v) if len(v) >= 3 else np.nan))
-    out["skew_delta_1H"] = df["h_nmr_peaks"].apply(
-        lambda p: _safe_stat(p, "delta", lambda v: skew(v) if len(v) >= 3 else np.nan))
-    out["kurt_delta_13C"] = df["c_nmr_peaks"].apply(
-        lambda p: _safe_stat(p, "delta (ppm)", lambda v: kurtosis(v) if len(v) >= 4 else np.nan))
-    return out
+    """Comprehensive, symmetric summary statistics of the raw 1H/13C peak lists.
+
+    Full distributional stats for both nuclei, chemical-shift region fractions,
+    integration/mass totals, intensity-weighted centroids, peak crowding, the
+    C:H peak ratio, and mean 13C linewidth. Columns are ``NMR_STATS_COLS``.
+    """
+    rows: list[list[float]] = []
+    for h_peaks, c_peaks in zip(df["h_nmr_peaks"], df["c_nmr_peaks"]):
+        H = list(h_peaks) if h_peaks is not None else []
+        C = list(c_peaks) if c_peaks is not None else []
+        hd = [p["delta"] for p in H]
+        cd = [p["delta (ppm)"] for p in C]
+        nH = np.array([p.get("nH", 0) for p in H], dtype=float)
+        integ = np.array([p.get("integral", 0.0) for p in C], dtype=float)
+        inten = np.array([p.get("intensity", 0.0) for p in C], dtype=float)
+        width = np.array([p.get("width (ppm)", 0.0) for p in C], dtype=float)
+
+        vals = _dist_stats(cd) + _dist_stats(hd)                       # 13C then 1H
+        vals += _region_fracs(hd, H_SHIFT_REGIONS) + _region_fracs(cd, C_SHIFT_REGIONS)
+        rng_h = (max(hd) - min(hd)) if hd else 0.0
+        rng_c = (max(cd) - min(cd)) if cd else 0.0
+        vals += [
+            float(nH.sum()), float(integ.sum()), float(inten.sum()),
+            float(np.average(hd, weights=nH)) if (nH.sum() > 0 and hd) else np.nan,
+            float(np.average(cd, weights=inten)) if (inten.sum() > 0 and cd) else np.nan,
+            len(hd) / rng_h if rng_h else np.nan,
+            len(cd) / rng_c if rng_c else np.nan,
+            len(cd) / len(hd) if hd else np.nan,
+            float(width.mean()) if width.size else np.nan,
+        ]
+        rows.append(vals)
+    return pd.DataFrame(rows, columns=NMR_STATS_COLS, index=df.index)
 
 
 def add_an14_features(df: pd.DataFrame) -> pd.DataFrame:

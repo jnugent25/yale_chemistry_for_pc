@@ -577,11 +577,24 @@ def main() -> None:
 
         rel_err = relative_reconstruction_error(original_va, recon_va)
 
+        # Probe-only codes. Scale-free losses (w1_grid; mass-normalized OT) leave the
+        # overall code magnitude an unpenalized DOF, which fit_transform (W,H joint)
+        # and transform (W-only) resolve at different scales -> the linear probes'
+        # StandardScaler, fit on train, miscalibrates on val and R² can go negative.
+        # Row-normalizing to unit L1 removes that free scale (the code analogue of
+        # spectral mass-normalization). Pointwise losses keep magnitude (real signal),
+        # and the recon metric above always uses the raw, un-normalized codes.
+        if repr_loss == "w1_grid":
+            w_tr_p = w_tr / np.maximum(w_tr.sum(axis=1, keepdims=True), 1e-8)
+            w_va_p = w_va / np.maximum(w_va.sum(axis=1, keepdims=True), 1e-8)
+        else:
+            w_tr_p, w_va_p = w_tr, w_va
+
         # Guardrail 1: functional-group micro-F1 on val
         v_tr = valid[train_idx]
         v_va = valid[val_idx]
         pred = fit_predict_per_label_logreg(
-            w_tr[v_tr], y_fg[train_idx][v_tr], w_va[v_va], random_state=0,
+            w_tr_p[v_tr], y_fg[train_idx][v_tr], w_va_p[v_va], random_state=0,
         )
         micro = float(f1_score(y_fg[val_idx][v_va], pred, average="micro", zero_division=0))
         macro = float(f1_score(y_fg[val_idx][v_va], pred, average="macro", zero_division=0))
@@ -591,8 +604,8 @@ def main() -> None:
         lp_va_mask = ~np.isnan(logp[val_idx])
         logp_r2 = probe_r2(
             args.probe,
-            w_tr[lp_tr_mask], logp[train_idx][lp_tr_mask],
-            w_va[lp_va_mask], logp[val_idx][lp_va_mask], 0,
+            w_tr_p[lp_tr_mask], logp[train_idx][lp_tr_mask],
+            w_va_p[lp_va_mask], logp[val_idx][lp_va_mask], 0,
         )
 
         # Primary target: gap_ev R^2 on val
@@ -601,8 +614,8 @@ def main() -> None:
         if gap_tr_mask.any() and gap_va_mask.any():
             gap_r2 = probe_r2(
                 args.probe,
-                w_tr[gap_tr_mask], gap[train_idx][gap_tr_mask],
-                w_va[gap_va_mask], gap[val_idx][gap_va_mask], 0,
+                w_tr_p[gap_tr_mask], gap[train_idx][gap_tr_mask],
+                w_va_p[gap_va_mask], gap[val_idx][gap_va_mask], 0,
             )
         else:
             gap_r2 = float("nan")
